@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>jqhelper 选项</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        margin: 0;
+        padding: 24px;
+        color: #1f2937;
+        background: #f8fafc;
+      }
+      main {
+        max-width: 560px;
+        margin: 0 auto;
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      p.hint {
+        color: #6b7280;
+        font-size: 13px;
+        margin: 0 0 20px;
+      }
+      label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        margin: 16px 0 6px;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 9px 10px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font-size: 13px;
+        font-family: ui-monospace, monospace;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+      }
+      button {
+        padding: 9px 16px;
+        border: 1px solid #2563eb;
+        background: #2563eb;
+        color: #fff;
+        border-radius: 6px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #fff;
+        color: #2563eb;
+      }
+      #status {
+        margin-top: 18px;
+        padding: 12px;
+        border-radius: 6px;
+        font-size: 13px;
+        background: #f1f5f9;
+        white-space: pre-wrap;
+      }
+      #status.ok {
+        background: #ecfdf5;
+        color: #065f46;
+      }
+      #status.err {
+        background: #fef2f2;
+        color: #991b1b;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>jqhelper</h1>
+      <p class="hint">
+        填写 jq-mcp 启动时打印的桥地址与 token。保存后插件会自动重连。<br />
+        请确保浏览器已登录聚宽，jq-mcp 不接触你的账号密码。
+      </p>
+
+      <label for="wsUrl">WebSocket 地址</label>
+      <input id="wsUrl" type="text" placeholder="ws://127.0.0.1:8790/ws" />
+
+      <label for="token">访问 token</label>
+      <input id="token" type="text" placeholder="在 jq-mcp 启动日志或 config.json 中查看" />
+
+      <div class="row">
+        <button id="save">保存并重连</button>
+        <button id="test" class="secondary">测试连接</button>
+      </div>
+
+      <div id="status">未检测</div>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

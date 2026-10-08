@@ -1,0 +1,31 @@
+# Build output
+bin/
+dist/
+*.exe
+
+# Runtime state (tokens, task snapshots, logs)
+.local/
+*.log
+
+# Generated bootstrap config for the unpacked extension
+extension/default-config.json
+
+# Extension packaged artifacts
+extension/*.zip
+extension/**/*.zip
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go
+vendor/
+
+# Playwright MCP scratch output
+.playwright-mcp/
+
+# OpenCode 项目级配置（含本机路径与 bridge token，不上传）
+opencode.json
+opencode.jsonc
