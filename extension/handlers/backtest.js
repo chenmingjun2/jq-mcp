@@ -9,6 +9,7 @@ export const backtestHandlers = {
       capital: p.capital,
       frequency: p.frequency || "day",
       compile: !!p.compile,
+      useCredit: !!p.useCredit,
     }),
 
   "backtest.list": (p) =>

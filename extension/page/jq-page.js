@@ -14,7 +14,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.2.2";
+  const VERSION = "0.2.4";
   const BASE = "https://www.joinquant.com";
 
   const PATHS = {
@@ -357,6 +357,31 @@
     return { items, folders };
   }
 
+  // strategyListFirstPage fetches only the root's first page. Newly created /
+  // just-saved strategies land at the top, so this resolves them without the
+  // recursive full-account scan that makes create/save slow as the account
+  // grows.
+  async function strategyListFirstPage() {
+    const html = await req(PATHS.strategyList, { raw: true });
+    return parseList(html);
+  }
+
+  // resolveStrategyIdByName prefers the cheap first-page lookup and only falls
+  // back to a full recursive scan when the strategy is not found there.
+  async function resolveStrategyIdByName(name) {
+    if (!name) return "";
+    try {
+      const first = await strategyListFirstPage();
+      const hit = first.items.find((x) => x.name === name);
+      if (hit) return hit.id;
+    } catch (_) {
+      /* fall through to the full scan */
+    }
+    const list = await strategyList({ all: true, limit: 0 });
+    const found = list.items.find((x) => x.name === name);
+    return found ? found.id : "";
+  }
+
   async function strategyFind(params) {
     const name = params.name || "";
     const list = await strategyList({ all: true, limit: 0 });
@@ -400,9 +425,8 @@
     const finalName = form["algorithm[name]"] || "";
     let resolvedId = id;
     if (finalName) {
-      const list = await strategyList({ all: true, limit: 0 });
-      const found = list.items.find((x) => x.name === finalName);
-      if (found) resolvedId = found.id;
+      const found = await resolveStrategyIdByName(finalName);
+      if (found) resolvedId = found;
     }
     return { id: resolvedId, saveId: savedId, name: finalName };
   }
@@ -428,9 +452,8 @@
       await strategySave({ strategyId: id, name, code });
     }
     if (name) {
-      const list = await strategyList({ all: true, limit: 0 });
-      const found = list.items.find((x) => x.name === name);
-      if (found) id = found.id;
+      const found = await resolveStrategyIdByName(name);
+      if (found) id = found;
     }
     return { id, name, type: params.type || "stock" };
   }
@@ -498,13 +521,23 @@
 
   // ------------------------------------------------------------- ops: backtest
 
+  // A backtest's detail/list ids never change, so cache the resolved internal
+  // id. Without this every stats/log/trade poll re-fetches the detail page just
+  // to translate the id, doubling the request count during polling.
+  const internalIdCache = new Map();
+
   async function resolveInternalBacktestId(id) {
+    const cached = internalIdCache.get(id);
+    if (cached) return { internalId: cached, doc: null };
     const html = await req(PATHS.backtestDetail, { params: { backtestId: id }, raw: true });
     if (looksLikeLogin(html)) fail("not_authenticated", "聚宽未登录或登录已过期");
     const doc = parseDoc(html);
     const el = doc.querySelector("#backtestId");
     const inner = el ? el.value : "";
-    return { internalId: inner || id, doc };
+    const internalId = inner || id;
+    internalIdCache.set(id, internalId);
+    internalIdCache.set(internalId, internalId);
+    return { internalId, doc };
   }
 
   async function backtestRun(params) {
@@ -520,6 +553,7 @@
     if (params.capital) form["backtest[baseCapital]"] = String(params.capital);
     form["backtest[frequency]"] = params.frequency === "minute" ? "minute" : "day";
     form["backtest[type]"] = params.compile ? "1" : "0";
+    if (params.useCredit) form["useCredit"] = "1";
 
     const data = await req(PATHS.build, {
       method: "POST",

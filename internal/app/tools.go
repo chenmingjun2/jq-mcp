@@ -429,6 +429,7 @@ func registerBacktestTools(s *mcp.Server, d deps) {
 			"capital":    mcp.Num("初始资金"),
 			"frequency":  mcp.StrEnum("频率，默认 day", "day", "minute"),
 			"compile":    mcp.Bool("true 表示只做编译运行"),
+			"useCredit":  mcp.Bool("额度耗尽时消耗积分继续（聚宽会提示 50000）"),
 		}, "strategyId", "start"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a jq.BacktestRunInput

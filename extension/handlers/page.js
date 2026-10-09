@@ -11,6 +11,15 @@ const TAB_POOL = 3;
 let tabPool = [];
 let tabCursor = 0;
 
+// Tabs whose MAIN world already has the page bridge injected. Re-injecting the
+// ~750-line file on every op costs an extra executeScript round trip; we only
+// inject once per tab and invalidate on navigation/close.
+const injectedTabs = new Set();
+chrome.tabs.onUpdated.addListener((id, info) => {
+  if (info.status === "loading") injectedTabs.delete(id);
+});
+chrome.tabs.onRemoved.addListener((id) => injectedTabs.delete(id));
+
 // ensureTab returns an existing joinquant tab or opens a background one.
 export async function ensureTab() {
   const tabs = await chrome.tabs.query({ url: JQ_MATCHES });
@@ -76,24 +85,44 @@ export async function pageRun(op, params) {
       files: [PAGE_SCRIPT],
       world: "MAIN",
     });
+  const runOp = () =>
+    chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: (operation, payload) => window.__jqhelper && window.__jqhelper.run(operation, payload),
+      args: [op, clean],
+    });
 
+  // Ensure the bridge is present (once per tab) and run the op.
+  const attempt = async () => {
+    if (!injectedTabs.has(tabId)) {
+      await inject();
+      injectedTabs.add(tabId);
+    }
+    return runOp();
+  };
+
+  let results;
   try {
-    await inject();
+    results = await attempt();
   } catch (_) {
     // The tab may have navigated or been discarded; reload once and retry.
+    injectedTabs.delete(tabId);
     await chrome.tabs.reload(tabId).catch(() => {});
     await waitForLoad(tabId);
-    await inject();
+    results = await attempt();
   }
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: (operation, payload) => window.__jqhelper && window.__jqhelper.run(operation, payload),
-    args: [op, clean],
-  });
-
-  const entry = results && results[0];
+  let entry = results && results[0];
+  if (!entry || entry.result === undefined || entry.result === null) {
+    // Bridge missing (e.g. the tab navigated without us seeing a loading event):
+    // force a re-inject and try once more.
+    injectedTabs.delete(tabId);
+    await inject();
+    injectedTabs.add(tabId);
+    results = await runOp();
+    entry = results && results[0];
+  }
   if (!entry || entry.result === undefined || entry.result === null) {
     throw jqError(CODES.internal, "页面脚本无返回，页面可能尚未加载完成");
   }

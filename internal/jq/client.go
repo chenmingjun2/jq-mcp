@@ -155,6 +155,7 @@ type BacktestRunInput struct {
 	Capital    float64 `json:"capital,omitempty"`
 	Frequency  string  `json:"frequency,omitempty"`
 	Compile    bool    `json:"compile,omitempty"`
+	UseCredit  bool    `json:"useCredit,omitempty"`
 }
 
 // BacktestRunResult is the identifiers returned by a submitted run.

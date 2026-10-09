@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "jqhelper",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "聚宽操作助手：为 jq-mcp 提供已登录浏览器内的策略、回测与数据读取能力。",
   "minimum_chrome_version": "111",
   "permissions": ["tabs", "scripting", "cookies", "storage", "alarms"],
