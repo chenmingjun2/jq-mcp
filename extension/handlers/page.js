@@ -74,6 +74,19 @@ export function waitForLoad(tabId) {
   });
 }
 
+// Mutating account-level operations (create/save/delete/move, folder.create)
+// share server-side draft state: strategy.create's id fallback picks the newest
+// strategy from the list, so two concurrent creates can cross wires and save the
+// wrong code. Serialize them through a single FIFO chain so the bridge stays
+// correct even when drivers issue concurrent requests. Read-only ops are
+// unaffected and still run in parallel across the tab pool.
+let mutationChain = Promise.resolve();
+export function serializeMutation(fn) {
+  const run = mutationChain.catch(() => {}).then(fn);
+  mutationChain = run.catch(() => {});
+  return run;
+}
+
 // pageRun injects the page bridge into a joinquant tab and invokes one op.
 export async function pageRun(op, params) {
   const clean = JSON.parse(JSON.stringify(params ?? {}));

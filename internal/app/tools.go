@@ -14,6 +14,7 @@ import (
 	"github.com/jqhelper/jq-mcp/internal/bridge"
 	"github.com/jqhelper/jq-mcp/internal/jq"
 	"github.com/jqhelper/jq-mcp/internal/mcp"
+	"github.com/jqhelper/jq-mcp/internal/sched"
 	"github.com/jqhelper/jq-mcp/internal/task"
 )
 
@@ -21,6 +22,7 @@ type deps struct {
 	jq    *jq.Client
 	tasks *task.Manager
 	hub   *bridge.Hub
+	sched *sched.Scheduler
 }
 
 func decodeArgs(args json.RawMessage, v any) error {

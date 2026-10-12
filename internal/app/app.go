@@ -18,6 +18,7 @@ import (
 	"github.com/jqhelper/jq-mcp/internal/config"
 	"github.com/jqhelper/jq-mcp/internal/jq"
 	"github.com/jqhelper/jq-mcp/internal/mcp"
+	"github.com/jqhelper/jq-mcp/internal/sched"
 	"github.com/jqhelper/jq-mcp/internal/task"
 )
 
@@ -37,6 +38,8 @@ type Options struct {
 	TaskFile       string
 	RequestTimeout time.Duration
 	LogLevel       slog.Level
+	Workers        int // scheduler worker threads
+	MaxConcurrent  int // scheduler concurrency cap
 }
 
 // Run starts every component and blocks until ctx is cancelled or stdin closes.
@@ -107,8 +110,23 @@ func Run(ctx context.Context, opts Options) error {
 	client := jq.New(hub, timeout)
 	tasks := task.NewManager(cfg.TaskFile)
 
+	// Server-side scheduler: owns concurrency, work-stealing and back-pressure.
+	workers := opts.Workers
+	if workers <= 0 {
+		workers = 16
+	}
+	maxConcurrent := opts.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 10
+	}
+	sch := sched.New(client, tasks, workers, maxConcurrent, logger)
+	sch.Start()
+	defer sch.Stop()
+
 	server := mcp.NewServer("jq-mcp", Version, logger)
-	registerTools(server, deps{jq: client, tasks: tasks, hub: hub})
+	d := deps{jq: client, tasks: tasks, hub: hub, sched: sch}
+	registerTools(server, d)
+	registerBatchTools(server, d)
 
 	return server.Run(ctx, os.Stdin, os.Stdout)
 }

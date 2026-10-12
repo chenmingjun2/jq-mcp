@@ -1,4 +1,4 @@
-import { pageRun } from "./page.js";
+import { pageRun, serializeMutation } from "./page.js";
 
 export const strategyHandlers = {
   "strategy.list": (p) =>
@@ -15,17 +15,22 @@ export const strategyHandlers = {
     pageRun("strategy.get", { strategyId: p.strategyId, includeCode: !!p.includeCode }),
 
   "strategy.create": (p) =>
-    pageRun("strategy.create", {
-      name: p.name,
-      code: p.code,
-      type: p.type || "stock",
-      folderId: p.folderId,
-    }),
+    serializeMutation(() =>
+      pageRun("strategy.create", {
+        name: p.name,
+        code: p.code,
+        type: p.type || "stock",
+        folderId: p.folderId,
+      })
+    ),
 
   "strategy.save": (p) =>
-    pageRun("strategy.save", { strategyId: p.strategyId, name: p.name, code: p.code }),
+    serializeMutation(() =>
+      pageRun("strategy.save", { strategyId: p.strategyId, name: p.name, code: p.code })
+    ),
 
-  "strategy.delete": (p) => pageRun("strategy.delete", { strategyId: p.strategyId }),
+  "strategy.delete": (p) => serializeMutation(() => pageRun("strategy.delete", { strategyId: p.strategyId })),
 
-  "strategy.move": (p) => pageRun("strategy.move", { strategyIds: p.strategyIds, folderId: p.folderId }),
+  "strategy.move": (p) =>
+    serializeMutation(() => pageRun("strategy.move", { strategyIds: p.strategyIds, folderId: p.folderId })),
 };

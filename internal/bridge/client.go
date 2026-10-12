@@ -12,9 +12,12 @@ import (
 )
 
 const (
-	writeWait      = 10 * time.Second
-	pongWait       = 90 * time.Second
-	pingPeriod     = (pongWait * 9) / 10
+	writeWait = 10 * time.Second
+	pongWait  = 60 * time.Second
+	// Ping more often than Chrome's MV3 service-worker idle window (~30s) AND
+	// send an application-level JSON ping each tick: browser-level control Pong
+	// is answered by the network stack and does NOT wake the service worker.
+	pingPeriod     = 20 * time.Second
 	maxMessageSize = 32 << 20 // 32 MiB: backtest source/stats payloads can be large
 	sendBuffer     = 64
 )
@@ -177,12 +180,18 @@ func (c *client) writePump() {
 			return
 		case msg := <-c.send:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil { //nolint
 				return
 			}
 		case <-ticker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			// Control ping: refreshes the read deadline via the pong handler.
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+			// Application-level ping: wakes Chrome's MV3 service worker so it
+			// does not idle-sleep and drop the socket (control frames don't).
+			if err := c.conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"ping"}`)); err != nil {
 				return
 			}
 		}

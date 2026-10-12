@@ -17,18 +17,20 @@ import (
 
 func main() {
 	var (
-		configPath   string
-		wsAddr       string
-		token        string
-		browserMode  string
-		headless     bool
-		chromePath   string
-		userDataDir  string
-		extensionDir string
-		taskFile     string
-		timeout      time.Duration
-		verbose      bool
-		showVersion  bool
+		configPath    string
+		wsAddr        string
+		token         string
+		browserMode   string
+		headless      bool
+		chromePath    string
+		userDataDir   string
+		extensionDir  string
+		taskFile      string
+		timeout       time.Duration
+		verbose       bool
+		showVersion   bool
+		workers       int
+		maxConcurrent int
 	)
 
 	flag.StringVar(&configPath, "config", "", "配置文件路径（默认 ~/.config/jq-mcp/config.json）")
@@ -43,6 +45,8 @@ func main() {
 	flag.DurationVar(&timeout, "request-timeout", 60*time.Second, "单次桥请求超时")
 	flag.BoolVar(&verbose, "verbose", false, "输出调试日志")
 	flag.BoolVar(&showVersion, "version", false, "打印版本号后退出")
+	flag.IntVar(&workers, "workers", 16, "批量调度器的工作线程数")
+	flag.IntVar(&maxConcurrent, "max-concurrent", 10, "批量调度器的平台并发上限（被拒时自动收紧）")
 	flag.Parse()
 
 	if showVersion {
@@ -82,6 +86,8 @@ func main() {
 		TaskFile:       taskFile,
 		RequestTimeout: timeout,
 		LogLevel:       level,
+		Workers:        workers,
+		MaxConcurrent:  maxConcurrent,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "jq-mcp 退出: %v\n", err)

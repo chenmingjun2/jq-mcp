@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>jqhelper offscreen bridge</title>
+  </head>
+  <body>
+    <!--
+      The offscreen document hosts the WebSocket to jq-mcp. Unlike the MV3
+      service worker (terminated after ~30s idle), an offscreen document runs in
+      a normal page context and is not subject to service-worker lifecycle
+      limits, so the connection survives worker sleep. Requests are relayed to
+      the service worker, whose activation is triggered by runtime messages.
+    -->
+    <script type="module" src="offscreen.js"></script>
+  </body>
+</html>

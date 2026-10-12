@@ -116,6 +116,13 @@ func (s *Server) handleLine(ctx context.Context, line []byte, out io.Writer) {
 		return
 	}
 
+	// Dispatch each request concurrently so a blocking tool (e.g. jq_batch_wait
+	// or a long jq_backtest_wait) never stalls the stdio loop and starves other
+	// requests. Responses are matched by id; writes are serialized by writeMu.
+	go s.dispatch(ctx, req, out)
+}
+
+func (s *Server) dispatch(ctx context.Context, req rpcRequest, out io.Writer) {
 	resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
 	switch req.Method {
 	case "initialize":
