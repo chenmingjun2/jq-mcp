@@ -1,6 +1,6 @@
 // Shared helpers for the jqhelper service worker.
 
-export const VERSION = "0.2.5";
+export const VERSION = "0.2.6";
 
 // Stable error codes shared with the Go bridge (see internal/apierr).
 export const CODES = {

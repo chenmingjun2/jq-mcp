@@ -7,6 +7,8 @@ import { handle } from "./handlers/index.js";
 
 const DEFAULT_URL = "ws://127.0.0.1:8790/ws";
 const KEEPALIVE_ALARM = "jqhelper-keepalive";
+const TAB_GC_ALARM = "jqhelper-tab-gc";
+const JQ_TAB_MAX = 2;
 const OFFSCREEN_PATH = "offscreen.html";
 
 // Fallback in-worker client, used only when the offscreen API is unavailable.
@@ -142,7 +144,13 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // (recreating it if Chrome closed it). The socket itself reconnects with
 // exponential backoff inside the offscreen document.
 chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+// 定时回收聚宽页签，避免并发/异常导致的页签泄漏把机器内存吃满。
+chrome.alarms.create(TAB_GC_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === TAB_GC_ALARM) {
+    gcJoinquantTabs();
+    return;
+  }
   if (alarm.name !== KEEPALIVE_ALARM) return;
   if (offscreenSupported()) {
     startClient();
@@ -152,6 +160,25 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     client.start();
   }
 });
+
+// gcJoinquantTabs 仅保留至多 JQ_TAB_MAX 个聚宽页签，其余关闭。
+async function gcJoinquantTabs() {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ["https://www.joinquant.com/*", "http://www.joinquant.com/*"],
+    });
+    const live = tabs.filter((t) => t.id != null && !t.discarded).map((t) => t.id);
+    for (const id of live.slice(JQ_TAB_MAX)) {
+      try {
+        await chrome.tabs.remove(id);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+}
 
 // Messaging channel: options page queries + offscreen-document relay.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

@@ -4,12 +4,39 @@ import { CODES, jqError } from "../lib/protocol.js";
 const JQ_MATCHES = ["https://www.joinquant.com/*", "http://www.joinquant.com/*"];
 const PAGE_SCRIPT = "page/jq-page.js";
 
-// chrome.scripting.executeScript serializes on a single tab, so running several
-// bridge requests through one joinquant tab makes them effectively sequential.
-// A small pool of joinquant tabs lets requests proceed in parallel.
-const TAB_POOL = 3;
+// chrome.scripting.executeScript serializes on a single tab, so a small pool of
+// joinquant tabs lets read-only requests proceed in parallel. Mutating ops are
+// already serialized (serializeMutation), so the pool stays small to bound memory.
+const TAB_POOL = 2;        // 目标页签数
+const TAB_MAX = 2;         // 硬上限：超过即回收（防并发/异常导致页签泄漏）
 let tabPool = [];
 let tabCursor = 0;
+let ensurePromise = null;  // 并发去重：避免多个请求同时创建页签
+
+function liveJqTabs(tabs) {
+  return tabs.filter((t) => t.id != null && !t.discarded).map((t) => t.id);
+}
+
+// gcTabs 保留前 keep 个聚宽页签，关闭其余（回收内存）。供后台定时调用。
+export async function gcTabs(keep = TAB_MAX) {
+  try {
+    const tabs = await chrome.tabs.query({ url: JQ_MATCHES });
+    const live = liveJqTabs(tabs);
+    const keepIds = live.slice(0, keep);
+    const drop = live.slice(keep);
+    for (const id of drop) {
+      try {
+        await chrome.tabs.remove(id);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    tabPool = tabPool.filter((id) => keepIds.includes(id));
+    return { kept: keepIds.length, closed: drop.length };
+  } catch (_) {
+    return { kept: 0, closed: 0 };
+  }
+}
 
 // Tabs whose MAIN world already has the page bridge injected. Re-injecting the
 // ~750-line file on every op costs an extra executeScript round trip; we only
@@ -30,20 +57,39 @@ export async function ensureTab() {
   return created;
 }
 
-// ensurePool keeps up to TAB_POOL live joinquant tabs and returns their ids.
+// ensurePool keeps up to TAB_POOL live joinquant tabs, recycles any extras, and
+// de-duplicates concurrent creation (the old version could leak tabs when several
+// bridge requests called it at once).
 async function ensurePool() {
-  const tabs = await chrome.tabs.query({ url: JQ_MATCHES });
-  const live = tabs.filter((t) => t.id != null && !t.discarded).map((t) => t.id);
-  tabPool = tabPool.filter((id) => live.includes(id));
-  for (const id of live) {
-    if (tabPool.length >= TAB_POOL) break;
-    if (!tabPool.includes(id)) tabPool.push(id);
-  }
-  while (tabPool.length < TAB_POOL) {
-    const created = await chrome.tabs.create({ url: "https://www.joinquant.com/", active: false });
-    await waitForLoad(created.id);
-    if (created.id != null) tabPool.push(created.id);
-    else break;
+  if (ensurePromise) return ensurePromise;
+  ensurePromise = (async () => {
+    const tabs = await chrome.tabs.query({ url: JQ_MATCHES });
+    const live = liveJqTabs(tabs);
+    tabPool = tabPool.filter((id) => live.includes(id));
+    for (const id of live) {
+      if (tabPool.length >= TAB_POOL) break;
+      if (!tabPool.includes(id)) tabPool.push(id);
+    }
+    // 回收多余页签（并发/崩溃遗留）
+    for (const id of live) {
+      if (tabPool.includes(id)) continue;
+      try {
+        await chrome.tabs.remove(id);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    while (tabPool.length < TAB_POOL) {
+      const created = await chrome.tabs.create({ url: "https://www.joinquant.com/", active: false });
+      await waitForLoad(created.id);
+      if (created.id != null) tabPool.push(created.id);
+      else break;
+    }
+  })();
+  try {
+    return await ensurePromise;
+  } finally {
+    ensurePromise = null;
   }
 }
 
