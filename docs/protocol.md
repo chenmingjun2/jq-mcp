@@ -91,7 +91,9 @@ Upgrade: websocket
 
 ## 2. MCP 工具
 
-传输：stdio，newline-delimited JSON-RPC 2.0。支持 `initialize` / `tools/list` / `tools/call` / `ping`。
+传输：stdio，newline-delimited JSON-RPC 2.0。支持 `initialize` / `tools/list` / `tools/call` / `ping`；
+服务端可下发 `notifications/message`（任务终结）与 `notifications/progress`
+（客户端在 `tools/call` 的 `_meta.progressToken` 中提供 token 时）。
 
 ### 2.1 诊断
 
@@ -161,12 +163,49 @@ Upgrade: websocket
 | `jq_file_read` | `path` | |
 | `jq_file_write` | `path`, `content`, `confirm` | 需 confirm |
 
-### 2.7 工具返回
+### 2.7 任务队列 / 事件回调
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `jq_batch_submit` | `jobs[]`, `maxConcurrent?`, `workers?`, `callbackUrl?`, `callbackSecret?`, `callbackOn?` | 非阻塞入队 |
+| `jq_batch_status` | `batchId?`, `limit?` | 快照 |
+| `jq_batch_wait` | `batchId`, `timeoutSeconds?`, `sinceEventId?`, `includeEvents?` | 阻塞到终结；`since>0` 有事即返回 |
+| `jq_batch_events` | `batchId`, `sinceEventId?`, `waitSeconds?`, `limit?` | 事件游标 / 长轮询 |
+
+事件类型：`job.started`、`job.done`、`job.failed`、`job.timeout`、`batch.done`。
+`jq_batch_events` 返回 `{events, nextEventId, done, hasMore}`，把 `nextEventId`
+作为下次的 `sinceEventId` 即可增量消费；`waitSeconds>0` 且无新事件时服务端最多阻塞该秒数。
+
+Webhook（`callbackUrl`，`callbackOn=batch|job|both`）：
+
+```http
+POST /your-endpoint HTTP/1.1
+Content-Type: application/json
+X-JQ-Event: batch.done
+X-JQ-Event-Id: 12
+X-JQ-Batch-Id: batch-20261018-1
+X-JQ-Delivery: 9f2c...
+X-JQ-Timestamp: 1760000000
+X-JQ-Signature: sha256=<HMAC-SHA256(secret, timestamp + "." + body)>
+```
+Body 为事件对象（`batch.done` 时附 `jobs` 与 `counts`）。失败按指数退避重试 5 次，
+单次 10s 超时；投递异步执行，不阻塞调度。
+
+MCP 通知：
+
+```json
+{"jsonrpc":"2.0","method":"notifications/message",
+ "params":{"level":"info","logger":"jq-mcp","data":{"type":"batch.done","batchId":"..."}}}
+{"jsonrpc":"2.0","method":"notifications/progress",
+ "params":{"progressToken":"p1","progress":3,"total":10,"message":"3/10 任务已终结"}}
+```
+
+### 2.8 工具返回
 
 成功：`{"content":[{"type":"text","text":"<JSON>"}],"isError":false}`
 失败：`{"content":[{"type":"text","text":"<错误 JSON>"}],"isError":true}`
 
-### 2.8 日期与数值约定
+### 2.9 日期与数值约定
 
 - 日期：`YYYY-MM-DD`；时间戳：Unix 毫秒。
 - 百分比：小数值（`0.1832` = `18.32%`），除非字段名含 `percent`。

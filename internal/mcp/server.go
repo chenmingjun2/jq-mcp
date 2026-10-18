@@ -37,6 +37,8 @@ type Server struct {
 	tools map[string]*Tool
 	order []string
 
+	outMu   sync.RWMutex
+	out     io.Writer
 	writeMu sync.Mutex
 }
 
@@ -78,8 +80,25 @@ type rpcResponse struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 
+// ProgressFunc reports progress for the current tools/call. Clients that send
+// _meta.progressToken get notifications/progress; others get a no-op.
+type ProgressFunc func(progress, total float64, message string)
+
+type progressKey struct{}
+
+// ProgressFromContext returns the caller's progress reporter (never nil).
+func ProgressFromContext(ctx context.Context) ProgressFunc {
+	if f, ok := ctx.Value(progressKey{}).(ProgressFunc); ok {
+		return f
+	}
+	return func(float64, float64, string) {}
+}
+
 // Run processes messages until the reader is exhausted or ctx is cancelled.
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
+	s.outMu.Lock()
+	s.out = out
+	s.outMu.Unlock()
 	reader := bufio.NewReaderSize(in, 1<<20)
 	for {
 		select {
@@ -156,7 +175,8 @@ func (s *Server) handleInitialize(params json.RawMessage) any {
 	return map[string]any{
 		"protocolVersion": version,
 		"capabilities": map[string]any{
-			"tools": map[string]any{"listChanged": false},
+			"tools":   map[string]any{"listChanged": false},
+			"logging": map[string]any{},
 		},
 		"serverInfo": map[string]any{"name": s.name, "version": s.version},
 	}
@@ -185,9 +205,24 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		Meta      json.RawMessage `json:"_meta"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &rpcError{Code: -32602, Message: "tools/call 参数无效"}
+	}
+	var meta struct {
+		ProgressToken any `json:"progressToken"`
+	}
+	_ = json.Unmarshal(p.Meta, &meta)
+	if meta.ProgressToken != nil {
+		ctx = context.WithValue(ctx, progressKey{}, ProgressFunc(func(progress, total float64, message string) {
+			s.Notify("notifications/progress", map[string]any{
+				"progressToken": meta.ProgressToken,
+				"progress":      progress,
+				"total":         total,
+				"message":       message,
+			})
+		}))
 	}
 	s.mu.RLock()
 	tool := s.tools[p.Name]
@@ -244,13 +279,39 @@ func resultText(result any) string {
 }
 
 func (s *Server) write(out io.Writer, resp rpcResponse) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	b, err := json.Marshal(resp)
 	if err != nil {
 		s.log.Error("序列化 MCP 响应失败", "err", err)
 		return
 	}
+	s.writeRaw(out, b)
+}
+
+// Notify sends a server-initiated JSON-RPC notification. It is used for
+// completion events (notifications/message) and progress reporting. MCP has no
+// server->client tool call, so this is the only push channel available.
+func (s *Server) Notify(method string, params any) {
+	msg := map[string]any{"jsonrpc": "2.0", "method": method}
+	if params != nil {
+		msg["params"] = params
+	}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		s.log.Error("序列化 MCP 通知失败", "err", err)
+		return
+	}
+	s.outMu.RLock()
+	out := s.out
+	s.outMu.RUnlock()
+	if out == nil {
+		return
+	}
+	s.writeRaw(out, b)
+}
+
+func (s *Server) writeRaw(out io.Writer, b []byte) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	b = append(b, '\n')
 	if _, err := out.Write(b); err != nil {
 		s.log.Error("写入 MCP 响应失败", "err", err)

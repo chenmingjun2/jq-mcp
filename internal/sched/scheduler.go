@@ -43,6 +43,7 @@ type Job struct {
 // JobState is a Job plus its live status/result.
 type JobState struct {
 	Job
+	BatchID   string          `json:"batchId,omitempty"`
 	Status    string          `json:"status"`
 	TaskID    string          `json:"taskId,omitempty"`
 	RemoteID  string          `json:"id,omitempty"`
@@ -58,6 +59,33 @@ type Batch struct {
 	ID        string      `json:"batchId"`
 	CreatedAt time.Time   `json:"createdAt"`
 	Jobs      []*JobState `json:"jobs"`
+	Callback  *Callback   `json:"callback,omitempty"`
+}
+
+// Callback configures a webhook delivered when jobs/batches reach a terminal
+// state. Secret is never serialized back to clients; it is only used to sign
+// the outgoing request body.
+type Callback struct {
+	URL    string `json:"url"`
+	Secret string `json:"-"`
+	On     string `json:"on,omitempty"` // batch (default) | job | both
+}
+
+// SubmitOptions carries optional per-batch behaviour.
+type SubmitOptions struct {
+	CallbackURL    string
+	CallbackSecret string
+	CallbackOn     string
+}
+
+// WaitResult is returned by WaitEvents: a batch snapshot plus the events that
+// happened after the caller's cursor.
+type WaitResult struct {
+	Batch       *Batch  `json:"batch"`
+	Events      []Event `json:"events"`
+	NextEventID int64   `json:"nextEventId"`
+	Done        bool    `json:"done"`
+	HasMore     bool    `json:"hasMore,omitempty"`
 }
 
 // Scheduler owns the queue, the workers and the concurrency cap.
@@ -79,6 +107,14 @@ type Scheduler struct {
 	seq           int
 	pollInterval  time.Duration
 	jobTimeout    time.Duration
+
+	// Event log and fan-out. events is per batch; eventSeq is global so a
+	// cursor stays valid even if it is carried across batches.
+	events    map[string][]Event
+	eventSeq  int64
+	eventCh   chan struct{}
+	eventSink func(Event)
+	callbacks *callbackSender
 }
 
 // New builds a scheduler. workers<=0 defaults to 16; maxConcurrent<=0 defaults to 1.
@@ -103,6 +139,9 @@ func New(client *jq.Client, tasks *task.Manager, workers, maxConcurrent int, log
 		stop:          make(chan struct{}),
 		pollInterval:  3 * time.Second,
 		jobTimeout:    2 * time.Hour,
+		events:        map[string][]Event{},
+		eventCh:       make(chan struct{}),
+		callbacks:     newCallbackSender(logger),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
@@ -175,11 +214,23 @@ func (s *Scheduler) release() {
 
 // Submit enqueues a batch and returns immediately.
 func (s *Scheduler) Submit(jobs []Job) *Batch {
+	return s.SubmitWithOptions(jobs, SubmitOptions{})
+}
+
+// SubmitWithOptions enqueues a batch with an optional completion callback.
+func (s *Scheduler) SubmitWithOptions(jobs []Job, opt SubmitOptions) *Batch {
 	s.mu.Lock()
 	s.seq++
 	b := &Batch{ID: "batch-" + time.Now().Format("20060102") + "-" + itoa(s.seq), CreatedAt: time.Now()}
+	if opt.CallbackURL != "" {
+		on := opt.CallbackOn
+		if on == "" {
+			on = "batch"
+		}
+		b.Callback = &Callback{URL: opt.CallbackURL, Secret: opt.CallbackSecret, On: on}
+	}
 	for i := range jobs {
-		js := &JobState{Job: jobs[i], Status: StPending}
+		js := &JobState{Job: jobs[i], Status: StPending, BatchID: b.ID}
 		if js.Frequency == "" {
 			js.Frequency = "day"
 		}
@@ -192,6 +243,14 @@ func (s *Scheduler) Submit(jobs []Job) *Batch {
 		s.queue <- js
 	}
 	return b
+}
+
+// SetEventSink installs a listener invoked for every job/batch lifecycle event.
+// The sink runs outside the scheduler lock and must not block for long.
+func (s *Scheduler) SetEventSink(fn func(Event)) {
+	s.mu.Lock()
+	s.eventSink = fn
+	s.mu.Unlock()
 }
 
 // Status returns a snapshot of a batch.
@@ -224,21 +283,14 @@ func (s *Scheduler) List(limit int) []*Batch {
 // Wait blocks until every job in the batch is terminal, the timeout elapses or
 // ctx is cancelled. It always returns the latest snapshot.
 func (s *Scheduler) Wait(ctx context.Context, batchID string, timeout time.Duration) (*Batch, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		b, err := s.Status(batchID)
-		if err != nil {
-			return nil, err
+	res, err := s.WaitEvents(ctx, batchID, 0, timeout, nil)
+	if err != nil {
+		if res != nil {
+			return res.Batch, err
 		}
-		if allTerminal(b) || time.Now().After(deadline) {
-			return b, nil
-		}
-		select {
-		case <-ctx.Done():
-			return b, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+		return nil, err
 	}
+	return res.Batch, nil
 }
 
 func (s *Scheduler) worker() {
@@ -263,8 +315,7 @@ func (s *Scheduler) process(js *JobState) {
 	defer s.release()
 	ctx := context.Background()
 
-	s.setStatus(js, StRunning, "")
-	js.StartedAt = time.Now()
+	s.start(js)
 
 	in := jq.BacktestRunInput{
 		StrategyID: js.StrategyID, Start: js.Start, End: js.End,
@@ -300,22 +351,29 @@ func (s *Scheduler) process(js *JobState) {
 		return
 	}
 
+	s.mu.Lock()
 	js.RemoteID, js.ListID = res.ID, res.ListID
+	s.mu.Unlock()
 	if s.tasks != nil {
 		t := s.tasks.Add(task.Task{
 			StrategyID: js.StrategyID, Mode: mode(js.Compile), Start: js.Start, End: js.End,
 			Capital: js.Capital, Frequency: js.Frequency, RemoteID: res.ID, ListID: res.ListID,
 			Status: task.StatusRunning,
 		})
+		s.mu.Lock()
 		js.TaskID = t.ID
+		s.mu.Unlock()
 	}
 
 	deadline := time.Now().Add(s.jobTimeout)
 	for time.Now().Before(deadline) {
 		raw, err := s.jq.BacktestStats(ctx, js.RemoteID)
 		if err == nil {
+			s.mu.Lock()
 			js.Metrics = raw
-			if statsComplete(raw) {
+			done := statsComplete(raw)
+			s.mu.Unlock()
+			if done {
 				s.finish(js, StDone, "")
 				return
 			}
@@ -335,24 +393,46 @@ func (s *Scheduler) process(js *JobState) {
 	s.finish(js, StTimeout, "")
 }
 
-func (s *Scheduler) setStatus(js *JobState, st, errMsg string) {
+func (s *Scheduler) start(js *JobState) {
+	var ev Event
+	var cb *Callback
 	s.mu.Lock()
-	js.Status = st
-	if errMsg != "" {
-		js.Error = errMsg
+	js.Status = StRunning
+	js.StartedAt = time.Now()
+	ev = s.appendEventLocked("job.started", js.BatchID, js, nil)
+	if b, ok := s.batches[js.BatchID]; ok && b.Callback != nil {
+		c := *b.Callback
+		cb = &c
 	}
 	s.mu.Unlock()
+	s.publish(ev, cb)
 }
 
 func (s *Scheduler) finish(js *JobState, st, errMsg string) {
+	var evs []Event
+	var cb *Callback
+	var taskID string
 	s.mu.Lock()
 	js.Status = st
 	if errMsg != "" {
 		js.Error = errMsg
 	}
 	js.EndedAt = time.Now()
-	taskID := js.TaskID
+	taskID = js.TaskID
+	evs = append(evs, s.appendEventLocked("job."+eventSuffix(st), js.BatchID, js, nil))
+	if b, ok := s.batches[js.BatchID]; ok && allTerminal(b) {
+		evs = append(evs, s.appendEventLocked("batch.done", b.ID, nil, b.Jobs))
+		if b.Callback != nil {
+			c := *b.Callback
+			cb = &c
+		}
+	}
 	s.mu.Unlock()
+
+	for _, ev := range evs {
+		s.publish(ev, cb)
+	}
+
 	if s.tasks != nil && taskID != "" {
 		tStatus := task.StatusDone
 		switch st {
@@ -373,6 +453,10 @@ func (s *Scheduler) finish(js *JobState, st, errMsg string) {
 
 func snapshot(b *Batch) *Batch {
 	cp := &Batch{ID: b.ID, CreatedAt: b.CreatedAt}
+	if b.Callback != nil {
+		c := *b.Callback
+		cp.Callback = &c
+	}
 	for _, js := range b.Jobs {
 		c := *js
 		cp.Jobs = append(cp.Jobs, &c)

@@ -157,6 +157,32 @@ Task {
 - `jq_task_list` / `jq_task_get` 让客户端查看 jq-mcp 记录的任务。
 - 任务默认保存在内存，可配置 `--task-file` 落盘（JSON）以便重启恢复。
 
+### 6.1 服务端调度器与完成回调
+
+`internal/sched` 提供批处理队列：客户端用 `jq_batch_submit` 声明任务，
+固定工作线程消费共享队列，并发上限可被平台拒绝自动收紧（背压），
+`jq_batch_wait` 一次阻塞到全部终结，无需客户端轮询。
+
+调度器同时维护每批次的事件日志：
+
+| 事件 | 触发 |
+|------|------|
+| `job.started` | 任务被工作线程取走并提交 |
+| `job.done` / `job.failed` / `job.timeout` | 任务终结 |
+| `batch.done` | 批次内所有任务终结 |
+
+事件有两个出口：
+
+1. **MCP 通知**：终结事件以 `notifications/message` 推给客户端；带
+   `_meta.progressToken` 的等待调用还会收到 `notifications/progress`。
+2. **Webhook**：`jq_batch_submit` 可带 `callbackUrl`，异步 POST 事件 JSON，
+   支持 HMAC-SHA256 签名（绑定时间戳与 body）、幂等 `X-JQ-Delivery`、
+   指数退避重试。回调在独立 goroutine 中执行，不占用调度工作线程。
+
+MCP 协议不允许服务端主动发起 tool 调用，因此“回调唤醒 agent”不可实现；
+agent 侧的正确形态是单次阻塞 `jq_batch_wait`，超时后用 `jq_batch_events`
+的 `sinceEventId` 游标续读。Webhook 面向外部脚本与服务。
+
 ---
 
 ## 7. 错误模型

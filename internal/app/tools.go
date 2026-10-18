@@ -1007,17 +1007,21 @@ func runTask(in jq.BacktestRunInput, res jq.BacktestRunResult) task.Task {
 
 func waitForBacktest(ctx context.Context, d deps, backtestID string, timeout, interval time.Duration) (any, error) {
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	progress := mcp.ProgressFromContext(ctx)
 	var last json.RawMessage
 	for {
 		raw, err := d.jq.BacktestStats(ctx, backtestID)
 		if err == nil {
 			last = raw
 			if statsLookComplete(raw) {
+				progress(time.Since(start).Seconds(), timeout.Seconds(), "回测完成")
 				return map[string]any{"status": "done", "stats": raw}, nil
 			}
 		} else if e := apierr.From(err); e.Code != apierr.CodeAPI && e.Code != apierr.CodeNotFound {
 			return nil, err
 		}
+		progress(time.Since(start).Seconds(), timeout.Seconds(), "等待回测指标")
 		if time.Now().After(deadline) {
 			res := map[string]any{"status": "timeout"}
 			if last != nil {

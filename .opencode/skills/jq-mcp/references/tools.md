@@ -48,6 +48,22 @@
 - `jq_backtest_batch` — `{strategyId, runs:[{start,end,capital?,frequency?,compile?}], compile?}`.
 - `jq_backtest_compare` — `{backtestIds[]}` → per-id `stats`.
 
+## Task queue / batch (server-side scheduler)
+
+- `jq_batch_submit` — `{jobs:[{tag?,strategyId,start,end?,capital?,frequency?,compile?,useCredit?,priority?}],
+  maxConcurrent?, workers?, callbackUrl?, callbackSecret?, callbackOn?}` → `{batchId, jobs,...}`.
+  Non-blocking. The scheduler owns concurrency/back-pressure.
+- `jq_batch_status` — `{batchId?, limit?}` → batch snapshot or recent batches.
+- `jq_batch_wait` — `{batchId, timeoutSeconds?, sinceEventId?, includeEvents?}`
+  → `{counts, done, jobs, events?, nextEventId, newEventCount}`. Blocks until
+  terminal; with `sinceEventId>0` returns on any new event (incremental follow)
+  and includes the event detail. Prefer this over sleep+poll.
+- `jq_batch_events` — `{batchId, sinceEventId?, waitSeconds?, limit?}` → `{events,
+  nextEventId, done, hasMore}`. Use for resume/long-poll.
+- Callback: when `callbackUrl` is set, terminal events are POSTed asynchronously
+  with `X-JQ-Signature` (HMAC-SHA256 over `timestamp.body`) and retried with
+  backoff. MCP also emits `notifications/message` on terminal events.
+
 ## Backtest data
 
 - `jq_backtest_get` — `{backtestId}` → detail + metrics + source.

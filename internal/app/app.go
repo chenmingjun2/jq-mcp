@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the server version reported during MCP initialize.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Options are the resolved command-line overrides.
 type Options struct {
@@ -124,6 +124,53 @@ func Run(ctx context.Context, opts Options) error {
 	defer sch.Stop()
 
 	server := mcp.NewServer("jq-mcp", Version, logger)
+
+	// Push terminal events to the MCP client as logging notifications. This is
+	// the closest thing MCP offers to a server-initiated callback; it lets
+	// clients surface completion immediately while jq_batch_wait stays the
+	// single blocking primitive for agents.
+	sch.SetEventSink(func(ev sched.Event) {
+		if ev.Type == sched.EvJobStarted {
+			return
+		}
+		data := map[string]any{
+			"eventId": ev.ID,
+			"type":    ev.Type,
+			"batchId": ev.BatchID,
+			"at":      ev.At,
+		}
+		level := "info"
+		if ev.Job != nil {
+			data["tag"] = ev.Job.Tag
+			data["status"] = ev.Job.Status
+			if ev.Job.TaskID != "" {
+				data["taskId"] = ev.Job.TaskID
+			}
+			if ev.Job.RemoteID != "" {
+				data["id"] = ev.Job.RemoteID
+			}
+			if ev.Job.Error != "" {
+				data["error"] = ev.Job.Error
+			}
+			if ev.Job.Status == sched.StFailed || ev.Job.Status == sched.StTimeout {
+				level = "error"
+			}
+		}
+		if len(ev.Jobs) > 0 {
+			counts := map[string]int{}
+			for _, js := range ev.Jobs {
+				counts[js.Status]++
+			}
+			data["total"] = len(ev.Jobs)
+			data["counts"] = counts
+		}
+		server.Notify("notifications/message", map[string]any{
+			"level":  level,
+			"logger": "jq-mcp",
+			"data":   data,
+		})
+	})
+
 	d := deps{jq: client, tasks: tasks, hub: hub, sched: sch}
 	registerTools(server, d)
 	registerBatchTools(server, d)

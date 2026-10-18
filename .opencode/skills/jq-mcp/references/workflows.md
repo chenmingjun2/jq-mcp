@@ -52,10 +52,26 @@ For each variant (one strategy per code change):
 Guidance:
 - Keep a control (baseline) variant.
 - Vary **one** thing per variant (a leg, a weight, a band, the window).
-- Respect the concurrency cap; use back-pressure (retry on `maxConcurrent`).
+- Respect the concurrency cap; prefer `jq_batch_submit` so the server fills
+  parallel slots and backs off automatically.
 - Use the **longest available window per instrument**; check listing dates first
   (see below) — a real ETF may be newer than your intended start.
 - Record results locally (e.g. via `jq_backtest_export`) before cleanup.
+
+Recommended loop (no client-side sleep):
+
+```
+jq_batch_submit {jobs:[{tag:"v1",strategyId,start,end}, ...]}
+jq_batch_wait   {batchId}                    # one blocking call
+# if the client truncates long calls:
+jq_batch_wait   {batchId, sinceEventId: nextEventId}
+jq_batch_events {batchId, sinceEventId: nextEventId, waitSeconds: 60}
+```
+
+If you need an external process to react, pass `callbackUrl` (and optionally
+`callbackSecret`) to `jq_batch_submit`; jq-mcp POSTs `batch.done` / `job.*`
+events with retries. MCP cannot wake the agent, so `jq_batch_wait` remains the
+agent-side primitive.
 
 To get an instrument's listing date, run a tiny strategy whose `initialize` logs
 `get_security_info(code).start_date`, then read `jq_backtest_logs`.

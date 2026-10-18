@@ -156,6 +156,14 @@ bin/jq-mcp --browser-mode launch --headless         # 之后可用无头
 | ✍️ `jq_backtest_batch` | 批量提交（同策略多区间/多资金） |
 | ✅ `jq_backtest_compare` | 多次回测指标对比 |
 
+### 任务队列 / 批处理（服务端调度）
+| 工具 | 说明 |
+|------|------|
+| ✍️ `jq_batch_submit` | 提交任务队列（可带 `callbackUrl` 回调） |
+| ✅ `jq_batch_status` | 批次进度与结果（非阻塞） |
+| ✅ `jq_batch_wait` | 一次阻塞到批次终结，无需客户端 sleep 轮询 |
+| ✅ `jq_batch_events` | 按 `sinceEventId` 增量读事件，可长轮询 |
+
 ### 回测数据
 | 工具 | 说明 |
 |------|------|
@@ -219,7 +227,38 @@ jq_backtest_export(backtestId, path="./bt.json")   # sections=stats,result,trade
 
 - 提交被拒时，错误 `details.maxConcurrent` 会带上 N（从服务端文案解析）。
 - `jq_account_limits` 抓账号接口与会员页，尽力返回 N 与会员信息。
-- 建议客户端按 N 控制并发；脚本侧可用“重试直到有空位”的背压方式。
+- 服务端调度器（`jq_batch_*`）用固定工作线程消费共享队列，把并发顶满，并在被平台拒绝时自动收紧上限、退避重试；客户端只负责声明任务。
+
+---
+
+## 任务完成回调
+
+`jq_batch_submit` 可选 `callbackUrl`（http/https）、`callbackSecret`、`callbackOn`
+（`batch` 默认 / `job` / `both`）。批次或任务终结时，服务端异步 POST 事件：
+
+```json
+{
+  "eventId": 12,
+  "type": "batch.done",
+  "batchId": "batch-20261018-1",
+  "at": "2026-10-18T12:00:00+08:00",
+  "jobs": [{"tag": "v1", "status": "done", "...": "..."}],
+  "counts": {"done": 1}
+}
+```
+
+- 事件类型：`job.started`、`job.done`、`job.failed`、`job.timeout`、`batch.done`。
+- 请求头：`X-JQ-Event`、`X-JQ-Event-Id`、`X-JQ-Batch-Id`、`X-JQ-Delivery`、
+  `X-JQ-Timestamp`；设置 `callbackSecret` 后另有
+  `X-JQ-Signature: sha256=HMAC_SHA256(secret, timestamp + "." + body)`。
+- 失败按 1s/2s/4s/8s 退避重试共 5 次，单次 10s 超时；回调不会阻塞调度线程。
+- 同时服务端会向 MCP 客户端推送 `notifications/message`（level/logger/data），
+  并支持 `notifications/progress`。
+
+对 agent 而言，**不要 sleep 后轮询**：提交后直接调用 `jq_batch_wait`
+一次阻塞到终结；若客户端会截断长调用，用 `sinceEventId` + `jq_batch_events`
+（`waitSeconds` 长轮询）续读，事件游标保证不丢结果。MCP 没有服务端主动唤醒
+模型的机制，webhook 面向外部脚本/服务，`jq_batch_wait` 才是 agent 侧的正确用法。
 
 ---
 
