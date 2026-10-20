@@ -148,12 +148,15 @@ jq-mcp 不落盘 Cookie；`jq_auth_get_cookie` 的返回值在工具描述里标
 Task {
   id, strategy_id, mode(backtest|compile), start, end, capital, frequency,
   remote_id, list_id, status(running|done|failed|cancelled|timeout),
-  created_at, updated_at, last_error
+  created_at, updated_at, last_error, error_logs
 }
 ```
 
 - `jq_backtest_run` 成功后在登记表中新建任务。
 - `jq_backtest_wait` 轮询 `backtest.stats`，直到出现核心指标或状态失败/超时。
+  每轮同时读取错误日志：一旦有错误立即返回 `status=failed` 与 `errors[]`，
+  不再等到超时。若该运行在任务登记表里是编译任务（`mode=compile`），则改为
+  轮询编译列表判定完成，并回写任务状态。
 - `jq_task_list` / `jq_task_get` 让客户端查看 jq-mcp 记录的任务。
 - 任务默认保存在内存，可配置 `--task-file` 落盘（JSON）以便重启恢复。
 
@@ -169,6 +172,15 @@ Task {
 |------|------|
 | `job.started` | 任务被工作线程取走并提交 |
 | `job.done` / `job.failed` / `job.timeout` | 任务终结 |
+
+轮询阶段每个周期先读错误日志：出现错误时任务直接 `failed`（`errorLogs`
+随事件一起下发），立即产生 `job.failed`，批次内全部终结时再产生
+`batch.done`，webhook 因此不会等到 `jobTimeout`。
+
+回测任务用 `backtest.stats` 判定完成；编译任务（`compile=true`）没有指标，
+改用编译列表（`backtest.list?compile=1`）：优先按 `backtest.run` 返回的
+`id` / `listId` 精确匹配，匹配不到时在宽限期后用“无运行中 + 已有终态”
+兜底，避免成功编译也空等到 `jobTimeout`。
 | `batch.done` | 批次内所有任务终结 |
 
 事件有两个出口：

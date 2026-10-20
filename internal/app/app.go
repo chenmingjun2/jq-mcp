@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the server version reported during MCP initialize.
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 // Options are the resolved command-line overrides.
 type Options struct {
@@ -151,6 +151,9 @@ func Run(ctx context.Context, opts Options) error {
 			}
 			if ev.Job.Error != "" {
 				data["error"] = ev.Job.Error
+			}
+			if len(ev.Job.ErrorLogs) > 0 {
+				data["errorLogs"] = ev.Job.ErrorLogs
 			}
 			if ev.Job.Status == sched.StFailed || ev.Job.Status == sched.StTimeout {
 				level = "error"

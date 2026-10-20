@@ -528,7 +528,7 @@ func registerBacktestTools(s *mcp.Server, d deps) {
 
 	s.Register(mcp.Tool{
 		Name:        "jq_backtest_wait",
-		Description: "轮询回测直到出现核心指标或超时，返回 status=done 时附带 metrics。",
+		Description: "轮询回测直到出现核心指标或超时；同时轮询错误日志，一旦有错误立即返回 status=failed 并附 errors。" + "返回 status=done 时附带 metrics。",
 		InputSchema: mcp.Obj(map[string]any{
 			"backtestId":          mcp.Str("回测 id"),
 			"timeoutSeconds":      mcp.Int("最长等待秒数，默认 900"),
@@ -1009,17 +1009,49 @@ func waitForBacktest(ctx context.Context, d deps, backtestID string, timeout, in
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
 	progress := mcp.ProgressFromContext(ctx)
+	// A compile run never produces metrics, so when jq-mcp registered this run
+	// as a compile we track it through the build list instead.
+	var tracked *task.Task
+	if d.tasks != nil {
+		tracked = d.tasks.FindByRemoteID(backtestID)
+	}
 	var last json.RawMessage
 	for {
-		raw, err := d.jq.BacktestStats(ctx, backtestID)
-		if err == nil {
-			last = raw
-			if statsLookComplete(raw) {
-				progress(time.Since(start).Seconds(), timeout.Seconds(), "回测完成")
-				return map[string]any{"status": "done", "stats": raw}, nil
+		// Error logs mean the run is broken: it will never produce metrics, so
+		// fail now instead of polling until the timeout.
+		if errs := fetchErrorLogs(ctx, d, backtestID); len(errs) > 0 {
+			progress(time.Since(start).Seconds(), timeout.Seconds(), "回测出错")
+			msg := summarizeErrorLogs(errs)
+			markTask(d, tracked, task.StatusFailed, msg, errs)
+			res := map[string]any{"status": "failed", "error": msg, "errors": errs}
+			if last != nil {
+				res["stats"] = last
 			}
-		} else if e := apierr.From(err); e.Code != apierr.CodeAPI && e.Code != apierr.CodeNotFound {
-			return nil, err
+			return res, nil
+		}
+		if tracked != nil && tracked.Mode == "compile" {
+			// Give a freshly submitted run a moment to register before trusting
+			// the list's "nothing is running" answer.
+			if time.Since(start) >= 3*time.Second {
+				terminal, running := compileState(ctx, d, tracked.StrategyID, tracked.RemoteID, tracked.ListID)
+				if terminal && !running {
+					progress(time.Since(start).Seconds(), timeout.Seconds(), "编译完成")
+					markTask(d, tracked, task.StatusDone, "", nil)
+					return map[string]any{"status": "done", "mode": "compile"}, nil
+				}
+			}
+		} else {
+			raw, err := d.jq.BacktestStats(ctx, backtestID)
+			if err == nil {
+				last = raw
+				if statsLookComplete(raw) {
+					progress(time.Since(start).Seconds(), timeout.Seconds(), "回测完成")
+					markTask(d, tracked, task.StatusDone, "", nil)
+					return map[string]any{"status": "done", "stats": raw}, nil
+				}
+			} else if e := apierr.From(err); e.Code != apierr.CodeAPI && e.Code != apierr.CodeNotFound {
+				return nil, err
+			}
 		}
 		progress(time.Since(start).Seconds(), timeout.Seconds(), "等待回测指标")
 		if time.Now().After(deadline) {
@@ -1035,6 +1067,22 @@ func waitForBacktest(ctx context.Context, d deps, backtestID string, timeout, in
 		case <-time.After(interval):
 		}
 	}
+}
+
+// markTask records the outcome of a wait on the tracked task, if any.
+func markTask(d deps, t *task.Task, status, errMsg string, errLogs []string) {
+	if d.tasks == nil || t == nil {
+		return
+	}
+	_, _ = d.tasks.Update(t.ID, func(x *task.Task) {
+		x.Status = status
+		if errMsg != "" {
+			x.Error = errMsg
+		}
+		if len(errLogs) > 0 {
+			x.ErrorLogs = errLogs
+		}
+	})
 }
 
 func statsLookComplete(raw json.RawMessage) bool {

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/jqhelper/jq-mcp/internal/apierr"
@@ -47,7 +48,7 @@ func registerCompileTool(s *mcp.Server, d deps) {
 			if err != nil {
 				return nil, err
 			}
-			errLogs, normLogs := collectCompileLogs(ctx, d, a.StrategyID, res.ID)
+			errLogs, normLogs := collectCompileLogs(ctx, d, a.StrategyID, res.ID, res.ListID)
 			return map[string]any{
 				"id":            res.ID,
 				"listId":        res.ListID,
@@ -73,7 +74,7 @@ func registerCompileTool(s *mcp.Server, d deps) {
 // collectCompileLogs waits for a compile run to finish and returns its error
 // and normal logs. It exits as soon as an error shows up or the compile reaches
 // a terminal state, instead of always paying a fixed multi-second wait.
-func collectCompileLogs(ctx context.Context, d deps, strategyID, id string) ([]string, []string) {
+func collectCompileLogs(ctx context.Context, d deps, strategyID, id, listID string) ([]string, []string) {
 	var errLogs, normLogs []string
 	for i := 0; i < 16; i++ {
 		errLogs = fetchErrorLogs(ctx, d, id)
@@ -83,7 +84,7 @@ func collectCompileLogs(ctx context.Context, d deps, strategyID, id string) ([]s
 		// Give the run a moment to register before trusting a terminal status,
 		// then stop as soon as it is no longer running.
 		if i >= 2 {
-			terminal, running := compileState(ctx, d, strategyID)
+			terminal, running := compileState(ctx, d, strategyID, id, listID)
 			if terminal && !running {
 				if again := fetchErrorLogs(ctx, d, id); len(again) > 0 {
 					errLogs = again
@@ -111,11 +112,11 @@ func fetchErrorLogs(ctx context.Context, d deps, id string) []string {
 	return parseLogArr(raw)
 }
 
-// compileState summarizes a strategy's compile (build) list. The list's ids
-// rotate on every request, so matching by id is impossible: we only look at
-// whether any run is still running and whether any has finished. This stays
-// correct regardless of list ordering.
-func compileState(ctx context.Context, d deps, strategyID string) (terminal, running bool) {
+// compileState summarizes a strategy's compile (build) list. When the list
+// exposes our run's id, that row decides the answer; otherwise it falls back to
+// the coarser "is anything still running / has anything finished" heuristic
+// (the ids on the build page are not always stable across requests).
+func compileState(ctx context.Context, d deps, strategyID string, ids ...string) (terminal, running bool) {
 	raw, err := d.jq.BacktestList(ctx, jq.BacktestListInput{
 		StrategyID: strategyID,
 		Limit:      20,
@@ -126,12 +127,15 @@ func compileState(ctx context.Context, d deps, strategyID string) (terminal, run
 	}
 	var p struct {
 		Items []struct {
+			ID     string `json:"id"`
+			ListID string `json:"listId"`
 			Status string `json:"status"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return false, false
 	}
+	matchedStatus := ""
 	for _, it := range p.Items {
 		switch it.Status {
 		case "running":
@@ -139,6 +143,14 @@ func compileState(ctx context.Context, d deps, strategyID string) (terminal, run
 		case "done", "failed", "cancelled":
 			terminal = true
 		}
+		for _, id := range ids {
+			if id != "" && (it.ID == id || it.ListID == id) {
+				matchedStatus = it.Status
+			}
+		}
+	}
+	if matchedStatus != "" {
+		return matchedStatus != "running", matchedStatus == "running"
 	}
 	return terminal, running
 }
@@ -151,6 +163,12 @@ func parseLogArr(raw json.RawMessage) []string {
 		return nil
 	}
 	return p.Logs
+}
+
+// summarizeErrorLogs renders the tail of an error log as a single-line error,
+// keeping the full list in the caller's "errors" field.
+func summarizeErrorLogs(logs []string) string {
+	return "回测错误日志: " + strings.Join(tail(logs, 5), "\n")
 }
 
 func tail(items []string, n int) []string {

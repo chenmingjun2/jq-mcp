@@ -150,7 +150,7 @@ bin/jq-mcp --browser-mode launch --headless         # 之后可用无头
 | ✅ `jq_strategy_compile` | 触发“编译运行”，返回编译错误/日志（正式回测前校验） |
 | ✍️ `jq_backtest_run` | 发起回测（`compile=true` 为编译运行） |
 | ✅ `jq_backtest_list` | 回测记录 |
-| ✅ `jq_backtest_wait` | 轮询到终态 |
+| ✅ `jq_backtest_wait` | 轮询到终态；有错误日志立即 `failed`；编译任务按编译列表判定 |
 | ✍️ `jq_backtest_cancel` | 取消运行中的回测（`confirm`） |
 | ✍️ `jq_backtest_delete` | 删除记录（`confirm`，`compile` 区分） |
 | ✍️ `jq_backtest_batch` | 批量提交（同策略多区间/多资金） |
@@ -248,6 +248,14 @@ jq_backtest_export(backtestId, path="./bt.json")   # sections=stats,result,trade
 ```
 
 - 事件类型：`job.started`、`job.done`、`job.failed`、`job.timeout`、`batch.done`。
+- **错误日志快速失败**：调度器轮询正式回测时会同时读取错误日志；一旦出现错误，
+  立即把任务置为 `failed`（附 `error` 与 `errorLogs`），并立刻发出
+  `job.failed` / `batch.done` 事件触发 webhook，而不是等到 `jobTimeout`。
+  编译任务（`compile=true`）同样适用。
+- **编译任务按编译列表判定完成**：编译运行不产出回测指标，调度器改为轮询
+  聚宽编译列表（buildList），优先用提交时返回的 `id` / `listId` 精确匹配该行；
+  若平台返回的 id 对不上，则在 10s 宽限期后用“没有运行中 + 已有终态”兜底，
+  不会再空等到 `jobTimeout`。远端状态 `failed` / `cancelled` 会映射为任务失败。
 - 请求头：`X-JQ-Event`、`X-JQ-Event-Id`、`X-JQ-Batch-Id`、`X-JQ-Delivery`、
   `X-JQ-Timestamp`；设置 `callbackSecret` 后另有
   `X-JQ-Signature: sha256=HMAC_SHA256(secret, timestamp + "." + body)`。

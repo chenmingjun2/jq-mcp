@@ -35,6 +35,7 @@ type Task struct {
 	ListID     string    `json:"listId,omitempty"`
 	Status     string    `json:"status"`
 	Error      string    `json:"error,omitempty"`
+	ErrorLogs  []string  `json:"errorLogs,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
@@ -137,6 +138,27 @@ func (m *Manager) Get(id string) (*Task, error) {
 	}
 	cp := *t
 	return &cp, nil
+}
+
+// FindByRemoteID returns the newest task tracking a remote run (detail id or
+// list id), or nil when this run was not submitted through jq-mcp.
+func (m *Manager) FindByRemoteID(remoteID string) *Task {
+	if remoteID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.order) - 1; i >= 0; i-- {
+		t, ok := m.tasks[m.order[i]]
+		if !ok {
+			continue
+		}
+		if t.RemoteID == remoteID || t.ListID == remoteID {
+			cp := *t
+			return &cp
+		}
+	}
+	return nil
 }
 
 // Update mutates a task via fn.

@@ -27,6 +27,10 @@ jq_backtest_wait {backtestId}            # or poll jq_backtest_stats later
 ```
 - `end` must be ≤ the previous trading day.
 - On `api_error` with `details.maxConcurrent`, a slot is busy — wait and retry.
+- `jq_backtest_wait` also polls the error log: as soon as the run writes one it
+  returns `status:"failed"` with `errors[]` instead of waiting for the timeout.
+  The scheduler does the same for `jq_batch_submit` and fires `job.failed` /
+  `batch.done` webhooks immediately.
 
 ## 3. Read backtest results
 

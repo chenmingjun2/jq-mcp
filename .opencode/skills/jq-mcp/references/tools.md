@@ -42,7 +42,9 @@
   → `{taskId, id, listId, strategyId, mode, status}`.
 - `jq_backtest_list` — `{strategyId, status?, limit?, compile?}` → `{items}`.
 - `jq_backtest_wait` — `{backtestId, timeoutSeconds?, pollIntervalSeconds?}`
-  → `{status: done|timeout, stats}`.
+  → `{status: done|failed|timeout, stats?, error?, errors?}`. Fails fast when
+  the run writes an error log. Runs registered as compile tasks poll the build
+  list instead of stats.
 - `jq_backtest_cancel` — `{backtestId, confirm}`.
 - `jq_backtest_delete` — `{backtestId, compile?, confirm}` (prefer `listId`).
 - `jq_backtest_batch` — `{strategyId, runs:[{start,end,capital?,frequency?,compile?}], compile?}`.
@@ -63,6 +65,9 @@
 - Callback: when `callbackUrl` is set, terminal events are POSTed asynchronously
   with `X-JQ-Signature` (HMAC-SHA256 over `timestamp.body`) and retried with
   backoff. MCP also emits `notifications/message` on terminal events.
+  Error logs are polled alongside metrics: a run that writes one becomes
+  `failed` immediately (`job.errorLogs` in the payload), so the webhook does not
+  wait for the job timeout.
 
 ## Backtest data
 

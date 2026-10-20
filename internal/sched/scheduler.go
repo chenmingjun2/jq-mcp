@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,7 @@ type JobState struct {
 	ListID    string          `json:"listId,omitempty"`
 	Metrics   json.RawMessage `json:"metrics,omitempty"`
 	Error     string          `json:"error,omitempty"`
+	ErrorLogs []string        `json:"errorLogs,omitempty"`
 	StartedAt time.Time       `json:"startedAt,omitempty"`
 	EndedAt   time.Time       `json:"endedAt,omitempty"`
 }
@@ -88,6 +90,15 @@ type WaitResult struct {
 	HasMore     bool    `json:"hasMore,omitempty"`
 }
 
+// backtestClient is the slice of jq.Client the scheduler needs. Keeping it
+// narrow lets tests drive the polling loop without a live browser bridge.
+type backtestClient interface {
+	BacktestRun(ctx context.Context, in jq.BacktestRunInput) (jq.BacktestRunResult, error)
+	BacktestList(ctx context.Context, in jq.BacktestListInput) (json.RawMessage, error)
+	BacktestStats(ctx context.Context, backtestID string) (json.RawMessage, error)
+	BacktestLogs(ctx context.Context, in jq.BacktestLogsInput) (json.RawMessage, error)
+}
+
 // Scheduler owns the queue, the workers and the concurrency cap.
 type Scheduler struct {
 	mu            sync.Mutex
@@ -98,7 +109,7 @@ type Scheduler struct {
 	workers       int
 	maxConcurrent int
 	inFlight      int
-	jq            *jq.Client
+	jq            backtestClient
 	tasks         *task.Manager
 	log           *slog.Logger
 	stop          chan struct{}
@@ -107,6 +118,7 @@ type Scheduler struct {
 	seq           int
 	pollInterval  time.Duration
 	jobTimeout    time.Duration
+	compileGrace  time.Duration
 
 	// Event log and fan-out. events is per batch; eventSeq is global so a
 	// cursor stays valid even if it is carried across batches.
@@ -133,15 +145,20 @@ func New(client *jq.Client, tasks *task.Manager, workers, maxConcurrent int, log
 		queue:         make(chan *JobState, 8192),
 		workers:       workers,
 		maxConcurrent: maxConcurrent,
-		jq:            client,
 		tasks:         tasks,
 		log:           logger,
 		stop:          make(chan struct{}),
 		pollInterval:  3 * time.Second,
 		jobTimeout:    2 * time.Hour,
+		compileGrace:  10 * time.Second,
 		events:        map[string][]Event{},
 		eventCh:       make(chan struct{}),
 		callbacks:     newCallbackSender(logger),
+	}
+	// Keep a nil *jq.Client as a nil interface so a client-less scheduler
+	// (tests, event-only use) never holds a typed-nil interface.
+	if client != nil {
+		s.jq = client
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
@@ -366,22 +383,48 @@ func (s *Scheduler) process(js *JobState) {
 	}
 
 	deadline := time.Now().Add(s.jobTimeout)
+	submittedAt := time.Now()
 	for time.Now().Before(deadline) {
-		raw, err := s.jq.BacktestStats(ctx, js.RemoteID)
-		if err == nil {
-			s.mu.Lock()
-			js.Metrics = raw
-			done := statsComplete(raw)
-			s.mu.Unlock()
-			if done {
+		// Poll the error log first: a runtime or compile error never heals, so
+		// the run will never produce useful output. Failing here (instead of
+		// waiting for jobTimeout) emits job.failed + batch.done immediately,
+		// which is what fires the webhook.
+		if errs := s.errorLogs(ctx, js.RemoteID); len(errs) > 0 {
+			s.finishWithLogs(js, StFailed, summarizeErrorLogs(errs), errs)
+			return
+		}
+		if js.Compile {
+			// Compile runs produce no metrics, so they are tracked through the
+			// build list instead of backtest.stats.
+			st := s.compileStatus(ctx, js, time.Since(submittedAt))
+			switch st {
+			case StDone:
 				s.finish(js, StDone, "")
+				return
+			case StFailed:
+				s.finish(js, StFailed, "聚宽侧编译失败（无错误日志）")
+				return
+			case "cancelled":
+				s.finish(js, StFailed, "聚宽侧编译已取消")
 				return
 			}
 		} else {
-			e := apierr.From(err)
-			if e.Code == apierr.CodeNoExtension || e.Code == apierr.CodeNotAuthenticated {
-				s.finish(js, StFailed, err.Error())
-				return
+			raw, err := s.jq.BacktestStats(ctx, js.RemoteID)
+			if err == nil {
+				s.mu.Lock()
+				js.Metrics = raw
+				done := statsComplete(raw)
+				s.mu.Unlock()
+				if done {
+					s.finish(js, StDone, "")
+					return
+				}
+			} else {
+				e := apierr.From(err)
+				if e.Code == apierr.CodeNoExtension || e.Code == apierr.CodeNotAuthenticated {
+					s.finish(js, StFailed, err.Error())
+					return
+				}
 			}
 		}
 		select {
@@ -391,6 +434,101 @@ func (s *Scheduler) process(js *JobState) {
 		}
 	}
 	s.finish(js, StTimeout, "")
+}
+
+// buildItem is one row of the backtest/build list.
+type buildItem struct {
+	ID     string `json:"id"`
+	ListID string `json:"listId"`
+	Status string `json:"status"`
+}
+
+// compileStatus reports the terminal state of a compile (build) run, or "" when
+// it is still running or cannot be determined yet.
+//
+// The row ids are matched exactly against the ids returned by backtest.run. If
+// JoinQuant hands out ids that do not line up, it falls back — after a grace
+// period — to the heuristic jq_strategy_compile uses: no run in flight for the
+// strategy plus at least one finished run.
+func (s *Scheduler) compileStatus(ctx context.Context, js *JobState, elapsed time.Duration) string {
+	if s.jq == nil {
+		return ""
+	}
+	raw, err := s.jq.BacktestList(ctx, jq.BacktestListInput{
+		StrategyID: js.StrategyID,
+		Limit:      20,
+		Compile:    true,
+	})
+	if err != nil {
+		return ""
+	}
+	var p struct {
+		Items []buildItem `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return ""
+	}
+	running, terminal, matched, matchedStatus := false, false, false, ""
+	for _, it := range p.Items {
+		if it.Status == "running" {
+			running = true
+		}
+		switch it.Status {
+		case "done", "failed", "cancelled":
+			terminal = true
+		}
+		if matchesRun(it, js.RemoteID, js.ListID) {
+			matched, matchedStatus = true, it.Status
+		}
+	}
+	if matched {
+		return matchedStatus
+	}
+	// Give a freshly submitted run time to show up before trusting the list.
+	if terminal && !running && elapsed >= s.compileGrace {
+		return StDone
+	}
+	return ""
+}
+
+func matchesRun(it buildItem, ids ...string) bool {
+	for _, id := range ids {
+		if id != "" && (it.ID == id || it.ListID == id) {
+			return true
+		}
+	}
+	return false
+}
+
+// errorLogs returns the run's error log entries. A transport/parse failure is
+// reported as nil on purpose: transient bridge errors must not fail the job,
+// the next poll retries.
+func (s *Scheduler) errorLogs(ctx context.Context, backtestID string) []string {
+	if s.jq == nil || backtestID == "" {
+		return nil
+	}
+	raw, err := s.jq.BacktestLogs(ctx, jq.BacktestLogsInput{BacktestID: backtestID, Error: true})
+	if err != nil {
+		return nil
+	}
+	var p struct {
+		Logs []string `json:"logs"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil
+	}
+	return p.Logs
+}
+
+// summarizeErrorLogs keeps the tail of the error log as the job's one-line
+// error; the full list travels in JobState.ErrorLogs (and thus in the webhook).
+func summarizeErrorLogs(logs []string) string {
+	const maxLines = 5
+	start := 0
+	if len(logs) > maxLines {
+		start = len(logs) - maxLines
+	}
+	return "回测错误日志: " + strings.Join(logs[start:], "\n")
 }
 
 func (s *Scheduler) start(js *JobState) {
@@ -409,6 +547,10 @@ func (s *Scheduler) start(js *JobState) {
 }
 
 func (s *Scheduler) finish(js *JobState, st, errMsg string) {
+	s.finishWithLogs(js, st, errMsg, nil)
+}
+
+func (s *Scheduler) finishWithLogs(js *JobState, st, errMsg string, errLogs []string) {
 	var evs []Event
 	var cb *Callback
 	var taskID string
@@ -416,6 +558,9 @@ func (s *Scheduler) finish(js *JobState, st, errMsg string) {
 	js.Status = st
 	if errMsg != "" {
 		js.Error = errMsg
+	}
+	if len(errLogs) > 0 {
+		js.ErrorLogs = errLogs
 	}
 	js.EndedAt = time.Now()
 	taskID = js.TaskID
@@ -445,6 +590,9 @@ func (s *Scheduler) finish(js *JobState, st, errMsg string) {
 			t.Status = tStatus
 			if errMsg != "" {
 				t.Error = errMsg
+			}
+			if len(errLogs) > 0 {
+				t.ErrorLogs = errLogs
 			}
 		})
 	}
