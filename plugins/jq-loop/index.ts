@@ -28,7 +28,7 @@ export default {
   id: "jq-loop",
   async setup(ctx) {
     const opt = { ...DEFAULTS, ...(ctx.options || {}) };
-    const base = String(opt.url || process.env.JQ_MCP_HTTP_URL || "http://127.0.0.1:8791").replace(/\/+$/, "");
+    const base = String(opt.url || process.env.JQ_MCP_HTTP_URL || "http://127.0.0.1:8792").replace(/\/+$/, "");
     const token = String(opt.token || process.env.JQ_MCP_TOKEN || "jqhelper-dev-token");
     const headers = { "Content-Type": "application/json" };
     if (token) headers.Authorization = `Bearer ${token}`;

@@ -214,7 +214,7 @@ MCP 通知：
 
 ## 3. 本地 HTTP API
 
-启用：`jq-mcp --http-addr 127.0.0.1:8791`（或配置 `http_addr`）。仅建议监听回环地址；
+启用：`jq-mcp --http-addr 127.0.0.1:8792`（或配置 `http_addr`）。仅建议监听回环地址；
 所有 `/api/*` 需要 token，支持 `Authorization: Bearer <token>`、`X-JQ-Token: <token>`
 或 `?token=<token>`。`/healthz` 不需要鉴权。
 

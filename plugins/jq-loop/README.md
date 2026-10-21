@@ -19,7 +19,7 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
 
 ## 前置条件
 
-- jq-mcp ≥ 0.3.0，且启动参数带 `--http-addr 127.0.0.1:8791`
+- jq-mcp ≥ 0.3.0，且启动参数带 `--http-addr 127.0.0.1:8792`
 - OpenCode V2（插件 API `@opencode/plugin`）
 - 扩展已连接、聚宽已登录
 
@@ -32,7 +32,7 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
     "servers": {
       "jq-mcp": {
         "type": "local",
-        "command": ["/path/to/bin/jq-mcp", "--ws-addr", "127.0.0.1:8790", "--http-addr", "127.0.0.1:8791", "--token", "..."],
+        "command": ["/path/to/bin/jq-mcp", "--ws-addr", "127.0.0.1:8790", "--http-addr", "127.0.0.1:8792", "--token", "..."],
       },
     },
   },
@@ -41,7 +41,7 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
       "package": "./plugins/jq-loop",
       "options": {
         "enabled": false,
-        "url": "http://127.0.0.1:8791",
+        "url": "http://127.0.0.1:8792",
         "token": "...",
         "wakeOn": "batch",
         "maxIterations": 5,
@@ -59,7 +59,7 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
 | 选项 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `false` | 初始开关；也可用 `/jq-loop on` 打开 |
-| `url` | `http://127.0.0.1:8791` | jq-mcp HTTP API（或环境变量 `JQ_MCP_HTTP_URL`） |
+| `url` | `http://127.0.0.1:8792` | jq-mcp HTTP API（或环境变量 `JQ_MCP_HTTP_URL`） |
 | `token` | `jqhelper-dev-token` | HTTP token（或 `JQ_MCP_TOKEN`） |
 | `wakeOn` | `batch` | `batch`：整批结束唤醒；`failed`：首个失败立即唤醒；`job`：每个任务都唤醒（受冷却限制） |
 | `maxIterations` | `5` | 每个会话最多自动唤醒次数；用户发新 prompt 时重置；`0` = 不限制 |

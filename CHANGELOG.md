@@ -6,7 +6,7 @@
 
 ### 新增
 
-- **本地 HTTP API**：`--http-addr 127.0.0.1:8791`（或配置 `http_addr`）。提供
+- **本地 HTTP API**：`--http-addr 127.0.0.1:8792`（或配置 `http_addr`）。提供
   `POST /api/batches`、`GET /api/batches[/{id}]`、`GET /api/batches/{id}/events`、
   **跨批次** `GET /api/events?since=&wait=`、`POST /api/tools/{name}`，所有 `/api/*`
   需 token。让常驻消费者与 MCP stdio 共用同一个 jq-mcp 进程，不再抢 8790。
@@ -14,7 +14,7 @@
   `ctx.session.synthetic(delivery="queue", resume=true)` 把失败/指标摘要送回原会话，
   实现“跑完 → 唤醒模型 → 修错/调参 → 再提交”的闭环。默认关闭，`/jq-loop on` 开启；
   支持 `wakeOn=batch|failed|job`、迭代上限、冷却、`dryRun`。
-- **mjs client attach 模式**：`startClient({url:"http://127.0.0.1:8791"})` 通过 HTTP
+- **mjs client attach 模式**：`startClient({url:"http://127.0.0.1:8792"})` 通过 HTTP
   提交批次/读取事件/代理工具，可与 OpenCode 的 MCP server 共存。
 - **会话透传**：MCP `tools/call._meta["ai.opencode/sessionID"]` 会写入批次的
   `sessionId`，并随事件下发（webhook / HTTP / 通知），便于插件路由。

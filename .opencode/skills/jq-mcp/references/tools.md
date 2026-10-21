@@ -105,7 +105,7 @@ Codes: `no_extension`, `not_authenticated`, `not_found`, `usage_error`,
 
 ## Local HTTP API (non-MCP)
 
-Enabled with `--http-addr 127.0.0.1:8791`. `/api/*` requires the bridge token
+Enabled with `--http-addr 127.0.0.1:8792`. `/api/*` requires the bridge token
 (`Authorization: Bearer`, `X-JQ-Token`, or `?token=`); `/healthz` is open.
 
 - `POST /api/batches` — same scheduler submit shape as `jq_batch_submit`

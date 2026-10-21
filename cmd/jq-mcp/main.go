@@ -36,7 +36,7 @@ func main() {
 
 	flag.StringVar(&configPath, "config", "", "配置文件路径（默认 ~/.config/jq-mcp/config.json）")
 	flag.StringVar(&wsAddr, "ws-addr", "", "WebSocket 监听地址，例如 127.0.0.1:8790")
-	flag.StringVar(&httpAddr, "http-addr", "", "可选 HTTP API 监听地址，例如 127.0.0.1:8791（供 jq-loop 插件/attach 客户端使用）")
+	flag.StringVar(&httpAddr, "http-addr", "", "可选 HTTP API 监听地址，例如 127.0.0.1:8792（供 jq-loop 插件/attach 客户端使用）")
 	flag.StringVar(&token, "token", "", "与插件共享的访问 token（默认自动生成）")
 	flag.StringVar(&browserMode, "browser-mode", "", "浏览器模式：attach（复用已开浏览器）或 launch（由本程序启动）")
 	flag.BoolVar(&headless, "headless", false, "launch 模式下是否无头运行（首次登录请用 --headless=false）")

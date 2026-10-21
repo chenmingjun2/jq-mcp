@@ -64,7 +64,7 @@ export class ToolError extends JqMcpError {
  * @param {object} [opts]
  * @param {string} [opts.bin]                 path to the jq-mcp binary
  * @param {number} [opts.port=8790]           bridge port (must match the extension)
- * @param {string} [opts.url]                 attach to a running jq-mcp HTTP API (e.g. http://127.0.0.1:8791)
+ * @param {string} [opts.url]                 attach to a running jq-mcp HTTP API (e.g. http://127.0.0.1:8792)
  * @param {string} [opts.token]               bridge/HTTP token
  * @param {string} [opts.sessionId]           optional session id recorded with batches (attach mode)
  * @param {string} [opts.home]                JQ_MCP_HOME (default: temp dir)

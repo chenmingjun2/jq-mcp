@@ -59,7 +59,7 @@ bin/jq-mcp --version
 
 > 也可用 `--token <token>` 与 `--ws-addr <host:port>` 覆盖。
 >
-> 需要插件/脚本共享同一个 jq-mcp 时，再加 `--http-addr 127.0.0.1:8791`：
+> 需要插件/脚本共享同一个 jq-mcp 时，再加 `--http-addr 127.0.0.1:8792`：
 > 提供批次提交、跨批次事件长轮询与工具代理（见 `docs/protocol.md` §3）。
 
 ### 4. 接入 MCP 客户端
@@ -75,7 +75,7 @@ jq-mcp 使用 **stdio** 传输。以 OpenCode 为例，项目级 `opencode.json`
         "type": "local",
         "command": ["/absolute/path/to/bin/jq-mcp",
                     "--ws-addr", "127.0.0.1:8790",
-                    "--http-addr", "127.0.0.1:8791",
+                    "--http-addr", "127.0.0.1:8792",
                     "--token", "YOUR_TOKEN"]
       }
     }

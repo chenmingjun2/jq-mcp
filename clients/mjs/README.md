@@ -53,7 +53,7 @@ no port conflict, and it coexists with OpenCode's MCP server:
 
 ```js
 const jq = await startClient({
-  url: "http://127.0.0.1:8791",   // jq-mcp --http-addr
+  url: "http://127.0.0.1:8792",   // jq-mcp --http-addr
   token: "jqhelper-dev-token",
 });
 ```
