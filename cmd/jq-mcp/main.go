@@ -1,14 +1,24 @@
 // Command jq-mcp is the MCP server that drives the jqhelper browser extension
 // to operate a JoinQuant account.
+//
+// Usage:
+//
+//	jq-mcp                 legacy: daemon + stdio in one process
+//	jq-mcp serve           daemon only (the singleton that owns the browser)
+//	jq-mcp proxy           stdio MCP adapter forwarding to the daemon
+//	jq-mcp status          show the running daemon for a profile
+//	jq-mcp stop            stop the daemon for a profile
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,8 +26,35 @@ import (
 )
 
 func main() {
+	args := os.Args[1:]
+	mode := app.ModeCombined
+	if len(args) > 0 {
+		switch args[0] {
+		case "serve":
+			mode, args = app.ModeDaemon, args[1:]
+		case "proxy":
+			mode, args = app.ModeProxy, args[1:]
+		case "status", "stop":
+			cmd, rest := args[0], args[1:]
+			profile := argValue(rest, "profile", "default")
+			var err error
+			if cmd == "status" {
+				err = app.Status(profile)
+			} else {
+				err = app.Stop(profile)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "jq-mcp %s: %v\n", cmd, err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+	os.Args = append([]string{os.Args[0]}, args...)
+
 	var (
 		configPath    string
+		profile       string
 		wsAddr        string
 		httpAddr      string
 		token         string
@@ -34,6 +71,7 @@ func main() {
 		maxConcurrent int
 	)
 
+	flag.StringVar(&profile, "profile", "default", "实例名（一个浏览器 profile 一个 daemon）")
 	flag.StringVar(&configPath, "config", "", "配置文件路径（默认 ~/.config/jq-mcp/config.json）")
 	flag.StringVar(&wsAddr, "ws-addr", "", "WebSocket 监听地址，例如 127.0.0.1:8790")
 	flag.StringVar(&httpAddr, "http-addr", "", "可选 HTTP API 监听地址，例如 127.0.0.1:8792（供 jq-loop 插件/attach 客户端使用）")
@@ -77,6 +115,8 @@ func main() {
 	defer stop()
 
 	err := app.Run(ctx, app.Options{
+		Mode:           mode,
+		Profile:        profile,
 		ConfigPath:     configPath,
 		WSAddr:         wsAddr,
 		HTTPAddr:       httpAddr,
@@ -92,8 +132,32 @@ func main() {
 		Workers:        workers,
 		MaxConcurrent:  maxConcurrent,
 	})
+	var running *app.ErrAlreadyRunning
+	if errors.As(err, &running) {
+		fmt.Fprintln(os.Stderr, running.Error())
+		return
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "jq-mcp 退出: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// argValue extracts --name value / --name=value from a small arg list.
+func argValue(args []string, name, fallback string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--"+name || a == "-"+name {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		if strings.HasPrefix(a, "--"+name+"=") {
+			return strings.TrimPrefix(a, "--"+name+"=")
+		}
+		if strings.HasPrefix(a, "-"+name+"=") {
+			return strings.TrimPrefix(a, "-"+name+"=")
+		}
+	}
+	return fallback
 }

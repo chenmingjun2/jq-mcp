@@ -220,8 +220,12 @@ MCP 通知：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/healthz` | `{ok,version,connected,cap,lastEventId}` |
+| GET | `/healthz` | `{ok,version,protocol,daemonId,startedAt,connected,cap,lastEventId,instances}` |
 | POST | `/api/tools/{name}` | body `{"arguments":{...}}`，同步调用任意 MCP 工具 |
+| POST | `/api/rpc` | 原始 JSON-RPC（MCP 一行），供 `jq-mcp proxy` 使用 |
+| GET | `/api/notifications` | SSE，推送 `notifications/message` / `notifications/progress` |
+| POST | `/mcp` | MCP Streamable HTTP：一个 JSON-RPC 请求 → `application/json` 响应 |
+| GET | `/mcp` | MCP Streamable HTTP 的通知流（SSE） |
 | POST | `/api/batches` | body `{jobs,maxConcurrent?,callbackUrl?,callbackSecret?,callbackOn?,sessionId?}`，提交批次 |
 | GET | `/api/batches?limit=20` | 最近批次 |
 | GET | `/api/batches/{id}` | 批次快照（`counts`/`done`/`jobs`） |
@@ -231,15 +235,19 @@ MCP 通知：
 事件响应：
 
 ```json
-{"events":[{"eventId":12,"type":"batch.done","batchId":"...","sessionId":"ses_...",
-            "at":"...","jobs":[...]}],
+{"events":[{"eventId":12,"daemonId":"default-720874","type":"batch.done",
+            "batchId":"...","sessionId":"ses_...","at":"...","jobs":[...]}],
  "nextEventId":12,"hasMore":false}
 ```
 
+- `eventId` 只在**一个 daemon 进程内**单调；全局唯一游标是 `(daemonId, eventId)`。
+  daemon 重启后 `eventId` 归零，客户端应以 `daemonId` 变化作为重置信号。
 - `since` 是游标；服务端保留本进程内的事件日志，支持补发。
 - `wait` 秒内无新事件时阻塞，`0` 表示立即返回；上限 60s。
-- `sessionId` 来自 OpenCode MCP `tools/call._meta["ai.opencode/sessionID"]`（或提交时显式传入）。
+- `sessionId` 来自 OpenCode MCP `tools/call._meta["ai.opencode/sessionID"]`，或由
+  `X-JQ-Session-Id` 请求头提供（`proxy`/HTTP 通道）。
 - 事件类型：`job.started` / `job.done` / `job.failed` / `job.timeout` / `batch.done`。
+- `/mcp` 额外要求：`Origin` 为空或 loopback，否则 403；无 token 401。
 
 ---
 

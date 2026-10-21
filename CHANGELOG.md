@@ -4,6 +4,33 @@
 
 ## 0.3.0
 
+### 架构 v2：daemon / proxy 拆分
+
+- **`jq-mcp serve` 常驻 daemon**：它是唯一的浏览器桥、调度器、任务库与事件日志持有者。
+  同一 profile 只允许一个实例：`flock` + descriptor（`~/.config/jq-mcp/instances/<profile>.json`）
+  防止第二个进程启动，并让客户端自动发现地址，不再依赖硬编码端口。
+- **`jq-mcp proxy`**：无状态 stdio MCP 适配器，把所有 JSON-RPC 转发到 daemon 的
+  `POST /api/rpc`，通知通过 `GET /api/notifications`（SSE）回传。OpenCode 每个 workspace
+  起一个 proxy 也不会再抢 8790。
+- **`/mcp`（Streamable HTTP）**：`POST /mcp` 处理请求，`GET /mcp` 推送通知；支持
+  `Mcp-Session-Id`、`Origin` 校验、Bearer token。客户端可直接 `type:"remote"`，
+  完全不 spawn 进程。
+- **`/api/rpc` / `/api/notifications`**：给 proxy 与脚本用的原始 JSON-RPC 通道。
+- **`jq-mcp status` / `jq-mcp stop`**：读取 descriptor 并探活 / 优雅停止。
+- **`make install-service`**：安装 `systemd --user` 单元，`Restart=always`。
+- **事件增加 `daemonId`**：`(daemonId, eventId)` 才是全局唯一游标；daemon 重启后
+  客户端据此重置游标。
+- **`X-JQ-Session-Id` 透传**：HTTP 通道也能把 OpenCode 的 sessionId 带到 `tools/call`。
+
+### jq-loop：per-server 单例
+
+- 插件状态改为进程级（`globalThis`）：OpenCode 每个 workspace 都会 `setup()`，但同一
+  server 进程内只有**一条长轮询、一个游标、一次唤醒**。
+- 游标按 `daemonId` 对齐；daemon 重启时自动重置。
+- poller 所属 workspace 关闭时自动迁移到存活实例。
+- 事件处理失败不再推进游标（此前会静默丢事件）。
+- `/jq-loop on|off|status` 语义为 **server 级**。
+
 ### 新增
 
 - **本地 HTTP API**：`--http-addr 127.0.0.1:8792`（或配置 `http_addr`）。提供

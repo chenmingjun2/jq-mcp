@@ -23,6 +23,7 @@ const (
 // Jobs is set for batch.done. Both are snapshots taken at emit time.
 type Event struct {
 	ID        int64       `json:"eventId"`
+	DaemonID  string      `json:"daemonId,omitempty"`
 	Type      string      `json:"type"`
 	BatchID   string      `json:"batchId"`
 	SessionID string      `json:"sessionId,omitempty"`
@@ -229,7 +230,7 @@ func (s *Scheduler) allEventsLocked(since int64, limit int) ([]Event, int64, boo
 
 func (s *Scheduler) appendEventLocked(typ, batchID string, js *JobState, jobs []*JobState) Event {
 	s.eventSeq++
-	ev := Event{ID: s.eventSeq, Type: typ, BatchID: batchID, At: time.Now()}
+	ev := Event{ID: s.eventSeq, DaemonID: s.daemonID, Type: typ, BatchID: batchID, At: time.Now()}
 	if b, ok := s.batches[batchID]; ok {
 		ev.SessionID = b.SessionID
 	}

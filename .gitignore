@@ -29,3 +29,6 @@ vendor/
 # OpenCode 项目级配置（含本机路径与 bridge token，不上传）
 opencode.json
 opencode.jsonc
+
+# Local config backups (may contain tokens)
+opencode.json.*

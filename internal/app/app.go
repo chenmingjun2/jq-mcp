@@ -1,15 +1,26 @@
 // Package app wires configuration, the WebSocket bridge, the browser launcher,
 // the jq domain client, the task manager and the MCP server into one process.
+//
+// Two run modes share the same daemon core:
+//
+//	jq-mcp serve   daemon only (browser bridge + scheduler + HTTP API + /mcp)
+//	jq-mcp proxy   per-client stdio MCP that forwards to a running daemon
+//	jq-mcp         legacy combined mode (daemon + stdio in one process)
 package app
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jqhelper/jq-mcp/internal/apierr"
@@ -26,8 +37,19 @@ import (
 // Version is the server version reported during MCP initialize.
 const Version = "0.3.0"
 
+// Mode selects how the process participates in the daemon/client split.
+type Mode string
+
+const (
+	ModeCombined Mode = ""      // legacy: daemon + stdio in one process
+	ModeDaemon   Mode = "serve" // daemon only
+	ModeProxy    Mode = "proxy" // stdio MCP forwarding to a daemon
+)
+
 // Options are the resolved command-line overrides.
 type Options struct {
+	Mode           Mode
+	Profile        string
 	ConfigPath     string
 	WSAddr         string
 	HTTPAddr       string
@@ -44,8 +66,21 @@ type Options struct {
 	MaxConcurrent  int // scheduler concurrency cap
 }
 
-// Run starts every component and blocks until ctx is cancelled or stdin closes.
+// Run dispatches to the selected mode.
 func Run(ctx context.Context, opts Options) error {
+	switch opts.Mode {
+	case ModeProxy:
+		return RunProxy(ctx, opts)
+	case ModeDaemon:
+		return runDaemon(ctx, opts, false)
+	default:
+		return runDaemon(ctx, opts, true)
+	}
+}
+
+// runDaemon starts the singleton and either serves stdio MCP (legacy combined
+// mode) or just blocks until ctx is cancelled.
+func runDaemon(ctx context.Context, opts Options, serveStdio bool) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: opts.LogLevel}))
 
 	cfg, err := config.Load(opts.ConfigPath)
@@ -56,9 +91,20 @@ func Run(ctx context.Context, opts Options) error {
 	if cfg.Browser.Mode != config.BrowserAttach && cfg.Browser.Mode != config.BrowserLaunch {
 		return apierr.Usage("browser mode 必须是 attach 或 launch，收到 %q", cfg.Browser.Mode)
 	}
+	// A daemon without an HTTP API cannot be discovered or driven by clients.
+	if !serveStdio && cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = "127.0.0.1:8792"
+	}
 	if err := cfg.Save(opts.ConfigPath); err != nil {
 		return err
 	}
+
+	profile := normalizeProfile(opts.Profile)
+	lease, err := AcquireInstance(profile)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
 
 	// Bridge WebSocket server.
 	hub := bridge.NewHub(cfg.Token, cfg.WSPath, logger)
@@ -84,8 +130,11 @@ func Run(ctx context.Context, opts Options) error {
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
+	daemonID := fmt.Sprintf("%s-%d", profile, os.Getpid())
 	logger.Info("jq-mcp 已启动",
 		"version", Version,
+		"daemonId", daemonID,
+		"mode", string(opts.Mode),
 		"bridge", fmt.Sprintf("ws://%s%s", listener.Addr().String(), cfg.WSPath),
 		"browserMode", cfg.Browser.Mode,
 		"config", config.DefaultPath(),
@@ -122,6 +171,7 @@ func Run(ctx context.Context, opts Options) error {
 		maxConcurrent = 10
 	}
 	sch := sched.New(client, tasks, workers, maxConcurrent, logger)
+	sch.SetDaemonID(daemonID)
 	sch.Start()
 	defer sch.Stop()
 
@@ -136,10 +186,11 @@ func Run(ctx context.Context, opts Options) error {
 			return
 		}
 		data := map[string]any{
-			"eventId": ev.ID,
-			"type":    ev.Type,
-			"batchId": ev.BatchID,
-			"at":      ev.At,
+			"eventId":  ev.ID,
+			"daemonId": ev.DaemonID,
+			"type":     ev.Type,
+			"batchId":  ev.BatchID,
+			"at":       ev.At,
 		}
 		level := "info"
 		if ev.Job != nil {
@@ -185,9 +236,13 @@ func Run(ctx context.Context, opts Options) error {
 	if cfg.HTTPAddr != "" {
 		handler := httpapi.New(httpapi.Options{
 			Version:   Version,
+			DaemonID:  daemonID,
+			Protocol:  Protocol,
+			StartedAt: time.Now(),
 			Token:     cfg.Token,
 			Scheduler: sch,
 			Tools:     server,
+			MCP:       server,
 			Connected: hub.Connected,
 			Logger:    logger,
 		})
@@ -206,13 +261,171 @@ func Run(ctx context.Context, opts Options) error {
 			defer cancel()
 			_ = apiServer.Shutdown(shutdownCtx)
 		}()
-		logger.Info("HTTP API 已启动", "addr", cfg.HTTPAddr, "auth", "token")
+		httpURL := "http://" + apiLn.Addr().String()
+		logger.Info("HTTP API 已启动", "addr", apiLn.Addr().String(), "auth", "token")
 		if !loopbackAddr(cfg.HTTPAddr) {
 			logger.Warn("HTTP API 监听非回环地址，请确认网络边界与 token 安全", "addr", cfg.HTTPAddr)
 		}
+		if err := lease.Publish(Descriptor{
+			ID:        daemonID,
+			Profile:   profile,
+			HTTPURL:   httpURL,
+			WSAddr:    listener.Addr().String(),
+			PID:       os.Getpid(),
+			Version:   Version,
+			StartedAt: time.Now(),
+		}); err != nil {
+			logger.Warn("写入 descriptor 失败，客户端将无法自动发现本实例", "err", err)
+		}
 	}
 
-	return server.Run(ctx, os.Stdin, os.Stdout)
+	if serveStdio {
+		return server.Run(ctx, os.Stdin, os.Stdout)
+	}
+	<-ctx.Done()
+	return nil
+}
+
+// stdoutMu serializes stdout writes: responses and relayed notifications are
+// produced by different goroutines, and a large tools/list response must not be
+// interleaved with a notification.
+var stdoutMu sync.Mutex
+
+func writeStdout(b []byte) error {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	_, err := os.Stdout.Write(b)
+	return err
+}
+
+// RunProxy is a stateless stdio MCP adapter. It forwards every JSON-RPC message
+// to the daemon's /api/rpc and relays server notifications back on stdout.
+func RunProxy(ctx context.Context, opts Options) error {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: opts.LogLevel}))
+	cfg, err := config.Load(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+	base := ResolveHTTPURL(opts.Profile, firstNonEmpty(opts.HTTPAddr, cfg.HTTPAddr))
+	if base == "" {
+		return fmt.Errorf("找不到 jq-mcp daemon（profile=%s）。先启动：jq-mcp serve 或 systemctl --user start jq-mcp", normalizeProfile(opts.Profile))
+	}
+	if _, err := Probe(base, cfg.Token); err != nil {
+		return fmt.Errorf("jq-mcp daemon 未运行（%s）：%w\n先启动：jq-mcp serve 或 systemctl --user start jq-mcp", base, err)
+	}
+	logger.Info("jq-mcp proxy 已连接", "daemon", base, "profile", normalizeProfile(opts.Profile))
+
+	go relayNotifications(ctx, base, cfg.Token, logger)
+
+	reader := bufio.NewReaderSize(os.Stdin, 1<<20)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+		line, err := reader.ReadBytes('\n')
+		if len(strings.TrimSpace(string(line))) > 0 {
+			resp, rerr := postRPC(ctx, base, cfg.Token, line)
+			if rerr != nil {
+				logger.Error("转发失败", "err", rerr)
+			} else if len(resp) > 0 {
+				_ = writeStdout(append(resp, '\n'))
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+func postRPC(ctx context.Context, base, token string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/rpc", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("daemon 返回 %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
+
+// relayNotifications keeps an SSE subscription open and re-emits every message
+// on the proxy's stdout so the MCP client still receives progress/completion
+// notifications.
+func relayNotifications(ctx context.Context, base, token string, logger *slog.Logger) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/notifications", nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := (&http.Client{}).Do(req)
+		if err != nil {
+			time.Sleep(backoff)
+			backoff = minDuration(backoff*2, 15*time.Second)
+			continue
+		}
+		backoff = time.Second
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1<<20), 4<<20)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ") + "\n"
+			if err := writeStdout([]byte(payload)); err != nil {
+				return
+			}
+		}
+		_ = resp.Body.Close()
+		if ctx.Err() != nil {
+			return
+		}
+		logger.Warn("通知流断开，重连中")
+		time.Sleep(backoff)
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // loopbackAddr reports whether a listen address is bound to loopback.

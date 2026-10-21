@@ -93,15 +93,77 @@ jq-mcp 使用 **stdio** 传输。以 OpenCode 为例，项目级 `opencode.json`
 
 ## 运行模式
 
+进程分成「一个常驻 daemon + 若干薄客户端」：
+
+| 命令 | 行为 | 适用 |
+|------|------|------|
+| `jq-mcp serve` | **常驻 daemon**：浏览器桥、调度器、任务库、事件日志、HTTP API、`/mcp` | 日常（systemd 托管） |
+| `jq-mcp proxy` | 无状态 stdio MCP 适配器，转发到 daemon | 不支持远程 MCP 的客户端 |
+| `jq-mcp`（无参数） | 兼容模式：daemon + stdio 同进程 | 旧配置、单次调试 |
+| `jq-mcp status` / `jq-mcp stop` | 查看 / 优雅停止某个 profile | 运维 |
+
+同一台机器、同一个浏览器 profile **只允许一个 `serve`**：第二个进程会打印
+“已在运行 (pid=…)” 并以 0 退出，不会再去抢 8790。
+
+### 常驻部署（推荐）
+
+```bash
+make build && make install-service
+systemctl --user enable --now jq-mcp
+# 需要“退出登录也常驻”时：
+# loginctl enable-linger $USER
+
+jq-mcp status          # descriptor + /healthz
+jq-mcp stop            # 优雅停止
+```
+
+### 客户端配置
+
+远程 MCP（推荐：客户端不再 spawn 任何进程）：
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "jq-mcp": {
+        "type": "remote",
+        "url": "http://127.0.0.1:8792/mcp",
+        "headers": { "Authorization": "Bearer <token>" }
+      }
+    }
+  }
+}
+```
+
+或 stdio 代理（兼容所有 MCP 客户端）：
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "jq-mcp": {
+        "type": "local",
+        "command": ["/path/to/jq-mcp/bin/jq-mcp", "proxy"]
+      }
+    }
+  }
+}
+```
+
+> `proxy` 从 `~/.config/jq-mcp/instances/<profile>.json` 读取 daemon 地址；
+> daemon 未运行时给出明确的启动提示，而不是 `bind: address already in use`。
+
+### 浏览器模式
+
 | 模式 | 行为 | 适用 |
 |------|------|------|
 | `attach`（默认） | jq-mcp 只提供桥服务，用户自己打开浏览器、加载插件并登录 | 日常使用、已有登录态 |
 | `launch` | jq-mcp 启动 Chrome/Chromium 并加载 `extension/` | 无头/隔离环境 |
 
 ```bash
-bin/jq-mcp                                   # attach（推荐）
-bin/jq-mcp --browser-mode launch --headless=false   # 首次登录用有头
-bin/jq-mcp --browser-mode launch --headless         # 之后可用无头
+bin/jq-mcp                                    # 兼容模式 + attach
+bin/jq-mcp serve --browser-mode launch --headless=false   # 首次登录用有头
+bin/jq-mcp serve --browser-mode launch --headless         # 之后可用无头
 ```
 
 `launch` 相关参数：`--chrome-path`、`--user-data-dir`、`--extension-dir`。

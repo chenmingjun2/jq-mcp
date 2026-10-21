@@ -1,0 +1,17 @@
+[Unit]
+Description=jq-mcp daemon (JoinQuant browser bridge)
+Documentation=https://github.com/jqhelper/jq-mcp
+After=network.target
+
+[Service]
+Type=simple
+# @BIN@ is replaced by `make install-service`.
+ExecStart=@BIN@ serve --profile default --http-addr 127.0.0.1:8792
+Restart=always
+RestartSec=2
+# The daemon itself does not need a desktop; the browser is attached externally
+# (browser.mode=attach). If you use launch mode, run it inside your session.
+Environment=RUST_BACKTRACE=0
+
+[Install]
+WantedBy=default.target

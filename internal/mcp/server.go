@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,6 +41,9 @@ type Server struct {
 	outMu   sync.RWMutex
 	out     io.Writer
 	writeMu sync.Mutex
+
+	sinkMu sync.RWMutex
+	sinks  []func([]byte)
 }
 
 // NewServer creates an empty server.
@@ -104,29 +108,86 @@ func SessionIDFromContext(ctx context.Context) string {
 	return v
 }
 
+// WithSessionID returns a context carrying the client session identifier.
+func WithSessionID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionKey{}, id)
+}
+
 // Run processes messages until the reader is exhausted or ctx is cancelled.
+//
+// The reader runs in its own goroutine: a stdio client keeps stdin open
+// forever, so a blocking ReadBytes would otherwise ignore SIGTERM and the
+// process would only die on SIGKILL.
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.outMu.Lock()
 	s.out = out
 	s.outMu.Unlock()
 	reader := bufio.NewReaderSize(in, 1<<20)
+
+	type chunk struct {
+		line []byte
+		err  error
+	}
+	ch := make(chan chunk, 1)
+	go func() {
+		defer close(ch)
+		for {
+			line, err := reader.ReadBytes('\n')
+			ch <- chunk{line: line, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-		}
-		line, err := reader.ReadBytes('\n')
-		if len(strings.TrimSpace(string(line))) > 0 {
-			s.handleLine(ctx, line, out)
-		}
-		if err != nil {
-			if err == io.EOF {
+		case c, ok := <-ch:
+			if !ok {
 				return nil
 			}
-			return err
+			if len(strings.TrimSpace(string(c.line))) > 0 {
+				s.handleLine(ctx, c.line, out)
+			}
+			if c.err != nil {
+				if c.err == io.EOF {
+					return nil
+				}
+				return c.err
+			}
 		}
 	}
+}
+
+// HandleMessage processes one JSON-RPC message synchronously and returns the
+// encoded response (nil for notifications). It is the transport-neutral entry
+// point used by the HTTP API (POST /api/rpc, POST /mcp) and by the stdio proxy.
+//
+// sessionID is attached to the context so tools can route results back to the
+// originating client session; it may be empty.
+func (s *Server) HandleMessage(ctx context.Context, line []byte, sessionID string) []byte {
+	var req rpcRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		b, _ := json.Marshal(rpcResponse{
+			JSONRPC: "2.0",
+			Error:   &rpcError{Code: -32700, Message: "无法解析 JSON-RPC 消息"},
+		})
+		return b
+	}
+	if len(req.ID) == 0 {
+		return nil // notification: no response
+	}
+	if sessionID != "" {
+		ctx = context.WithValue(ctx, sessionKey{}, sessionID)
+	}
+	var buf bytes.Buffer
+	s.dispatch(ctx, req, &buf)
+	return bytes.TrimSpace(buf.Bytes())
 }
 
 func (s *Server) handleLine(ctx context.Context, line []byte, out io.Writer) {
@@ -320,6 +381,10 @@ func (s *Server) write(out io.Writer, resp rpcResponse) {
 // Notify sends a server-initiated JSON-RPC notification. It is used for
 // completion events (notifications/message) and progress reporting. MCP has no
 // server->client tool call, so this is the only push channel available.
+//
+// Notifications are delivered to the stdio writer (if any) and to every
+// registered sink, which lets the HTTP API fan them out over SSE while a stdio
+// client is attached at the same time.
 func (s *Server) Notify(method string, params any) {
 	msg := map[string]any{"jsonrpc": "2.0", "method": method}
 	if params != nil {
@@ -333,10 +398,26 @@ func (s *Server) Notify(method string, params any) {
 	s.outMu.RLock()
 	out := s.out
 	s.outMu.RUnlock()
-	if out == nil {
+	if out != nil {
+		s.writeRaw(out, b)
+	}
+	s.sinkMu.RLock()
+	sinks := append([]func([]byte){}, s.sinks...)
+	s.sinkMu.RUnlock()
+	for _, fn := range sinks {
+		fn(b)
+	}
+}
+
+// AddNotificationSink registers a transport-specific notification consumer.
+// Sinks receive the raw JSON message (no trailing newline).
+func (s *Server) AddNotificationSink(fn func([]byte)) {
+	if fn == nil {
 		return
 	}
-	s.writeRaw(out, b)
+	s.sinkMu.Lock()
+	s.sinks = append(s.sinks, fn)
+	s.sinkMu.Unlock()
 }
 
 func (s *Server) writeRaw(out io.Writer, b []byte) {

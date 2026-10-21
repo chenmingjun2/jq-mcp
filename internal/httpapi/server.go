@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jqhelper/jq-mcp/internal/apierr"
+	"github.com/jqhelper/jq-mcp/internal/mcp"
 	"github.com/jqhelper/jq-mcp/internal/sched"
 )
 
@@ -43,9 +44,13 @@ type Tools interface {
 // Options wires the API to the running server.
 type Options struct {
 	Version   string
+	DaemonID  string
+	Protocol  int
+	StartedAt time.Time
 	Token     string // required on /api/* when non-empty
 	Scheduler Scheduler
 	Tools     Tools
+	MCP       *mcp.Server // optional: enables /api/rpc, /api/notifications and /mcp
 	Connected func() bool
 	Logger    *slog.Logger
 	MaxWait   time.Duration // long-poll cap, defaults to 60s
@@ -59,7 +64,10 @@ func New(opt Options) http.Handler {
 	if opt.MaxWait <= 0 {
 		opt.MaxWait = 60 * time.Second
 	}
-	s := &server{opt: opt}
+	s := &server{opt: opt, hub: newNotifyHub()}
+	if opt.MCP != nil {
+		opt.MCP.AddNotificationSink(s.hub.publish)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.Handle("POST /api/tools/{name}", s.auth(s.callTool))
@@ -68,10 +76,19 @@ func New(opt Options) http.Handler {
 	mux.Handle("GET /api/batches/{id}", s.auth(s.getBatch))
 	mux.Handle("GET /api/batches/{id}/events", s.auth(s.batchEvents))
 	mux.Handle("GET /api/events", s.auth(s.allEvents))
+	if opt.MCP != nil {
+		mux.Handle("POST /api/rpc", s.auth(s.rpc))
+		mux.Handle("GET /api/notifications", s.auth(s.notifications))
+		mux.HandleFunc("POST /mcp", s.mcpPost)
+		mux.HandleFunc("GET /mcp", s.mcpGet)
+	}
 	return mux
 }
 
-type server struct{ opt Options }
+type server struct {
+	opt Options
+	hub *notifyHub
+}
 
 // ------------------------------------------------------------------ handlers
 
@@ -83,9 +100,13 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":          true,
 		"version":     s.opt.Version,
+		"protocol":    s.opt.Protocol,
+		"daemonId":    s.opt.DaemonID,
+		"startedAt":   s.opt.StartedAt,
 		"connected":   connected,
 		"cap":         s.opt.Scheduler.Cap(),
 		"lastEventId": s.opt.Scheduler.LastEventID(),
+		"instances":   s.hub.subscribers(),
 	})
 }
 
@@ -101,7 +122,7 @@ func (s *server) callTool(w http.ResponseWriter, r *http.Request) {
 	if len(body.Arguments) == 0 {
 		body.Arguments = json.RawMessage("{}")
 	}
-	result, err := s.opt.Tools.CallTool(r.Context(), name, body.Arguments)
+	result, err := s.opt.Tools.CallTool(withSession(r), name, body.Arguments)
 	if err != nil {
 		e := apierr.From(err)
 		writeErr(w, statusFor(e), e)

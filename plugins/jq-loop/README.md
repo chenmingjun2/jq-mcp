@@ -17,6 +17,25 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
 
 它只做“事件 → 唤醒”，不接管浏览器桥、不执行回测、不注册替代工具。
 
+## 作用域：一个 OpenCode server 一个 jq-loop
+
+OpenCode 会为**每个 workspace** 调一次 `setup()`，但所有 workspace 都在同一个 server
+进程里，共享同一份 session 与插件存储。如果逐 workspace 各持一份状态，会出现：
+
+- 同一事件被唤醒两次（每个实例都看到全部事件）；
+- 多个实例写同一个 `cursor` 键，后写的覆盖前者 → 丢事件。
+
+因此本插件把状态放在 `globalThis`：同一进程内只有**一条长轮询、一个游标、一次唤醒**。
+不同 server 进程（例如另起一个 `opencode serve`）各自独立，互不影响。
+
+- `/jq-loop on|off` 是 **server 级**开关；
+- `/jq-loop status` 会打印 poller 归属、游标与存活 workspace 数；
+- poller 所属 workspace 关闭时，会自动迁移到其它存活实例。
+
+```
+[jq-loop] 已开启（server 级，迭代 3/∞，wakeOn=stream，poller=pid:169212 cursor=128，workspaces=3）
+```
+
 ## 为什么默认是流式（stream）
 
 回测任务长短不一。如果等 `batch.done` 再唤醒：
@@ -97,15 +116,16 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
 - **事件源**：`GET /api/events?since=<cursor>&wait=20`，游标保存在 `ctx.storage`。
   OpenCode 自身的事件流是 live-only（无 replay），所以这里用 jq-mcp 的游标事件流。
   插件首次加载（没有游标）时从**当前最新事件**开始，不会唤醒历史批次。
+- **游标**：存 `{daemonId, seq}`。daemon 重启后 `daemonId` 变化，插件自动从最新事件重新开始。
 - **会话归属**：OpenCode 在 MCP `tools/call._meta["ai.opencode/sessionID"]` 里带 session id；
   jq-mcp 会把它写进批次和事件（`sessionId` 字段）。插件只唤醒事件对应的那个会话。
-- **stream 汇总**：同一批次的完成事件先进入内存队列，`coalesceMs` 后一次性唤醒；
-  `batch.done` 到达时会立即 flush 尚未发出的结果，不会等窗口。
+- **stream 汇总**：同一会话在 `coalesceMs` 窗口内完成的多个批次会合并成**一次**唤醒，
+  摘要里按批次分段；`batch.done` 到达时立即 flush 尚未发出的结果，不会等窗口。
 - **唤醒方式**：`ctx.session.synthetic({delivery:"queue", resume:true})`，不会打断当前 step；
   synthetic 也不触发 prompt hooks，避免把自动消息当成用户输入。
+- **失败处理**：`handleEvent` 抛错时**不推进游标**，退避后重试；此前会静默丢事件。
 - **摘要**：失败项优先（含 `errorLogs` 末尾几行），然后是成功项的核心指标；总长度截断到 12KB。
-- **重启**：插件重启后从 storage 里的游标继续；jq-mcp 重启会重置事件序号，插件检测到
-  `lastEventId < cursor` 时自动回退到最新位置。
+- **重启**：插件重启后从 storage 里的游标继续。
 - **不会唤醒**：通过脚本/HTTP 提交且没有 `sessionId` 的批次（例如 mjs CLI 的扫参）。
 
 ## 测试
@@ -116,4 +136,9 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
 node --test plugins/jq-loop/core.test.mjs
 ```
 
-HTTP 事件面的端到端验证见 `go test ./internal/httpapi/` 和本地 mock（`.local/bench/pluginflow.mjs`）。
+端到端（真实 jq-mcp + mock 扩展）：
+
+```sh
+node .local/plugincheck/run.mjs    # 单 workspace
+node .local/plugincheck/multi.mjs  # 两个 workspace：一次唤醒、poller 迁移
+```

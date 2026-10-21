@@ -126,6 +126,7 @@ type Scheduler struct {
 	// cursor stays valid even if it is carried across batches.
 	events    map[string][]Event
 	eventSeq  int64
+	daemonID  string
 	eventCh   chan struct{}
 	eventSink func(Event)
 	callbacks *callbackSender
@@ -274,6 +275,22 @@ func (s *Scheduler) SetEventSink(fn func(Event)) {
 	s.mu.Lock()
 	s.eventSink = fn
 	s.mu.Unlock()
+}
+
+// SetDaemonID stamps every event with the daemon that produced it. Consumers
+// use (daemonId, eventId) as a globally unique cursor: a daemon restart resets
+// eventId, so the pair must change together.
+func (s *Scheduler) SetDaemonID(id string) {
+	s.mu.Lock()
+	s.daemonID = id
+	s.mu.Unlock()
+}
+
+// DaemonID returns the configured daemon identity.
+func (s *Scheduler) DaemonID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.daemonID
 }
 
 // Status returns a snapshot of a batch.
