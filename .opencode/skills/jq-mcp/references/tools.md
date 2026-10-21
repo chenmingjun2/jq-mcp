@@ -69,6 +69,19 @@
   `failed` immediately (`job.errorLogs` in the payload), so the webhook does not
   wait for the job timeout.
 
+### Loop modes (jq-loop)
+
+- `/jq-loop on` makes the OpenCode plugin wake the originating session from the
+  HTTP event feed. Default `wakeOn=stream`: each terminal job wakes the session
+  (500ms coalescing), **not** `batch.done`. `job` = window 0; `batch` = old
+  barrier behavior; `failed` = first failure only.
+- Only jobs submitted through MCP carry the OpenCode `sessionId`; HTTP/CLI
+  submissions write events but do not wake a session.
+- For slot utilization, submit `cap + N` jobs and refill on each wake; do not
+  wait for the slowest job in a batch.
+- `jq_batch_wait` remains the same-turn primitive; `jq-loop` is for turns that
+  already ended.
+
 ## Backtest data
 
 - `jq_backtest_get` — `{backtestId}` → detail + metrics + source.

@@ -1,123 +1,164 @@
-# jq-mcp workflows
+# jq-mcp workflows (queue-first)
 
-## 0. Always start here
+The standard path is **compile batch → gate → backtest queue → stream results →
+refill → cleanup**. Individual `jq_backtest_run` calls are for ad-hoc checks only.
+
+## 0. Preflight
 
 ```
 jq_health
 ```
-- `connected:false` → stop; tell the user to open the browser, enable jqhelper, and
+- `connected:false` → stop; ask the user to open the browser, enable jqhelper and
   set the token. Do not loop.
-- `loggedIn:false` → `jq_auth_open_login`, ask the user to log in, then `jq_auth_refresh`.
+- `loggedIn:false` → `jq_auth_open_login`, ask the user to log in, `jq_auth_refresh`.
+- Concurrency cap: `jq_account_limits` (or the `details.maxConcurrent` from a
+  rejection). Remember it as `cap`.
 
-## 1. Read a strategy's source
+For next-turn iteration: `/jq-loop on` (OpenCode), and jq-mcp started with
+`--http-addr` (default `127.0.0.1:8792`).
+
+## 1. Read a strategy
 
 ```
 jq_strategy_find {name}
 jq_strategy_get  {strategyId, includeCode:true}
 ```
-Note: JoinQuant edit ids rotate — resolve by name right before you need it.
 
-## 2. Create / edit and backtest
+Edit ids rotate — resolve by name immediately before use.
 
-```
-jq_strategy_create {name, code}          # or jq_strategy_save on an existing id
-jq_strategy_compile {strategyId}         # ok:false → fix code, do not backtest
-jq_backtest_run {strategyId, start, end, capital?, frequency?}
-jq_backtest_wait {backtestId}            # or poll jq_backtest_stats later
-```
-- `end` must be ≤ the previous trading day.
-- On `api_error` with `details.maxConcurrent`, a slot is busy — wait and retry.
-- `jq_backtest_wait` also polls the error log: as soon as the run writes one it
-  returns `status:"failed"` with `errors[]` instead of waiting for the timeout.
-  The scheduler does the same for `jq_batch_submit` and fires `job.failed` /
-  `batch.done` webhooks immediately.
+## 2. Compile batch (gate)
 
-## 3. Read backtest results
+One batch for all variants:
 
 ```
-jq_backtest_stats     {backtestId}
-jq_backtest_result    {backtestId, offset}      # equity curve, paged
-jq_backtest_trades    {backtestId}              # transactions
-jq_backtest_positions {backtestId}              # daily positions
-jq_backtest_monthly   {backtestId}              # period/monthly returns
-jq_backtest_logs      {backtestId, error:true}  # compile/runtime errors
-```
-Stats use decimals: `algorithm_return=0.24` means +24%; `sharpe`, `max_drawdown`,
-`annual_algo_return`, `trading_days`, `turnover_rate`.
-
-## 4. Ablation / parameter sweep
-
-For each variant (one strategy per code change):
-1. `jq_strategy_create {name:"ABL-<tag>", code}`
-2. `jq_strategy_compile {strategyId}` — skip variants that fail
-3. `jq_backtest_run {strategyId, start, end, capital, frequency:"day"}`
-4. collect `jq_backtest_stats`
-
-Guidance:
-- Keep a control (baseline) variant.
-- Vary **one** thing per variant (a leg, a weight, a band, the window).
-- Respect the concurrency cap; prefer `jq_batch_submit` so the server fills
-  parallel slots and backs off automatically.
-- Use the **longest available window per instrument**; check listing dates first
-  (see below) — a real ETF may be newer than your intended start.
-- Record results locally (e.g. via `jq_backtest_export`) before cleanup.
-
-Recommended loop (no client-side sleep):
-
-```
-jq_batch_submit {jobs:[{tag:"v1",strategyId,start,end}, ...]}
-jq_batch_wait   {batchId}                    # one blocking call
-# if the client truncates long calls:
-jq_batch_wait   {batchId, sinceEventId: nextEventId}
-jq_batch_events {batchId, sinceEventId: nextEventId, waitSeconds: 60}
+jq_batch_submit {
+  jobs: [
+    {tag:"c-v1", strategyId:"...", start:"2024-01-02", end:"2024-01-10", compile:true},
+    {tag:"c-v2", strategyId:"...", start:"2024-01-02", end:"2024-01-10", compile:true}
+  ]
+}
+jq_batch_wait {batchId}
 ```
 
-If you need an external process to react, pass `callbackUrl` (and optionally
-`callbackSecret`) to `jq_batch_submit`; jq-mcp POSTs `batch.done` / `job.*`
-events with retries. MCP cannot wake the agent, so `jq_batch_wait` remains the
-agent-side primitive.
+- `job.done` = compile passed (no metrics); `job.failed` carries
+  `error`/`errorLogs`.
+- Fix failures, then recompile. Never backtest a failed variant.
+- Same-turn wait is fine; for many variants use `/jq-loop on` and let stream
+  wakes deliver each compile result.
 
-For true asynchronous iteration (agent turn already ended), use the OpenCode
-`jq-loop` plugin: jq-mcp's HTTP event feed (`--http-addr`) is consumed by the
-plugin, which calls `session.synthetic` to wake the same session with a result
-digest. Enable it per session with `/jq-loop on`. Standalone scripts can use
-`clients/mjs/jq-mcp-client.mjs` in attach mode (`startClient({url})`) against the
-same HTTP API.
+## 3. Backtest queue (over-subscribe)
 
-To get an instrument's listing date, run a tiny strategy whose `initialize` logs
-`get_security_info(code).start_date`, then read `jq_backtest_logs`.
+Flatten `variants × windows` into jobs. Submit **`cap + N`** jobs, not exactly
+`cap`: queued jobs keep slots warm while you think.
 
-### Interpreting an ablation (overfitting checks)
+```
+jq_batch_submit {
+  jobs: [
+    {tag:"v1-long",   strategyId:"...", start:"2015-01-01", end:"...", capital:100000, frequency:"day"},
+    {tag:"v1-recent", strategyId:"...", start:"2024-01-01", end:"...", capital:100000, frequency:"day"},
+    ...
+  ],
+  maxConcurrent: 10
+}
+```
 
-- If a leg/asset only exists recently (check listing dates) but the strategy
-  "needs" it, that is **hindsight selection**.
-- Compare **short vs long** windows: if ranking flips (which leg is best), recent
-  results don't generalize.
-- Compare vs a naive equal-weight of the legs (rebalancing premium) and vs the
-  benchmark to separate **Beta from alpha**.
-- Prefer improvements that are stable across windows (e.g. adding a bond/cash leg
-  to cut drawdown) over "swap an asset to raise return".
+**Same turn** (need results before answering):
 
-## 5. Export / import
+```
+jq_batch_wait {batchId}                       # one blocking call
+jq_batch_wait {batchId, sinceEventId: next}   # incremental follow
+```
+
+**Next turn** (turn can end):
+
+```
+/jq-loop on        # stream (default): wake on each completed job, 500ms coalesce
+```
+
+Then, on every wake:
+
+1. append/record the new `job` results (`tag`, `status`, `metrics`, `errorLogs`);
+2. if the queue is draining, submit replacements or the next variants;
+3. do **not** wait for `batch.done` — it is not the iteration barrier.
+
+If an event is missed:
+
+```
+jq_batch_events {batchId, sinceEventId: nextEventId, waitSeconds: 30}
+```
+
+## 4. Result shape
+
+- Events: `job.status`, `job.metrics` (raw `backtest.stats`; actual metrics under
+  `job.metrics.metrics`), `job.error`, `job.errorLogs`, `job.id`, `job.listId`,
+  `job.taskId`.
+- `jq_batch_wait` returns `{counts, done, jobs, events?, nextEventId}`.
+- Use `jq_backtest_stats` for the raw payload; `logs(error:true)` for errors;
+  `trades/positions/monthly/result` for detail.
+- Stats use decimals: `algorithm_return=0.24` = +24%.
+
+## 5. Drivers (Node)
+
+Attach to the shared jq-mcp (no second bridge):
+
+```js
+import { startClient } from "<jq-mcp>/clients/mjs/jq-mcp-client.mjs";
+
+const jq = await startClient({ url: "http://127.0.0.1:8792" });
+const compile = await jq.compileAll(variants, { onJob: (r) => log(r) });
+const ok = compile.filter((r) => r.status === "done");
+const results = await jq.runAll(jobs, {
+  submit: { maxConcurrent: cap },
+  onJob: (r) => log(r.tag, r.status, r.metrics?.sharpe),
+});
+await jq.close();
+```
+
+- `compileAll`/`runAll` stream via HTTP events; no per-job polling.
+- Only self-spawn if you need isolation; stop the OpenCode jq-mcp first, and
+  release `:8790`/`:8792` afterwards.
+- Scripts submitting over HTTP without `sessionId` do not wake an OpenCode
+  session; use them for batch jobs, not interactive iteration.
+
+## 6. Ablation quality checks
+
+- Keep a control/baseline variant; vary one thing per variant.
+- Compare short vs long windows; ranking flips = not generalizable.
+- Separate beta from alpha (vs benchmark / equal-weight legs).
+- Prefer stable improvements (drawdown/cost) over a single-point return peak.
+- Use the longest available window per instrument; check listing dates first
+  (a tiny strategy that logs `get_security_info(code).start_date`, then
+  `jq_backtest_logs`).
+
+## 7. Export / cleanup
 
 ```
 jq_strategy_export {strategyId, path:"./s.py", format:"py"}
 jq_backtest_export {backtestId, path:"./bt.json", sections:"stats,result,trades"}
-jq_strategy_import {strategyId, path:"./s.py", confirm:true}
-jq_code_standardize {code}      # inject slippage/cost into initialize
-```
-
-## 6. Cleanup
-
-Delete temporary strategies you created (ask first):
-```
 jq_strategy_delete {strategyId, confirm:true}
-jq_backtest_delete {backtestId: <listId>, compile?, confirm:true}
+jq_backtest_delete {backtestId:<listId>, confirm:true}
 ```
 
-## 7. Rate limits
+Summarize locally and update `trials.csv` **before** deleting cloud artifacts.
+Only delete this repo’s prefixed temporary strategies; never user-owned ones.
+
+## 8. Rate limits / failures
 
 ```
-jq_account_limits        # try to read the concurrency cap
+jq_account_limits
 ```
-Or rely on the reactive `details.maxConcurrent` from a rejected submit.
+
+- On `api_error` with `details.maxConcurrent`, the scheduler already tightens and
+  retries; do not spray more submissions.
+- Compile/backtest runtime errors fail immediately with `errorLogs`; read them
+  before retrying.
+- `useCredit: true` only when authorized; record which runs used credits.
+
+## 9. Anti-patterns
+
+- Per-job `jq_backtest_run` + `jq_backtest_stats` loops.
+- `sleep`-based polling.
+- Waiting for `batch.done` before submitting the next wave.
+- Submitting exactly `cap` jobs and leaving slots idle.
+- Backtesting code that did not compile.
+- Deleting cloud strategies before saving results.

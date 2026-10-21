@@ -1,72 +1,156 @@
 ---
 name: jq-mcp
-description: Operate a JoinQuant (聚宽) account through jq-mcp MCP tools — read strategy code, create/edit strategies, compile-check, run/manage backtests, read backtest data, run ablations/sweeps, and clean up. Use when the user asks to inspect or modify JoinQuant strategies/backtests via jq-mcp.
+description: Operate a JoinQuant (聚宽) account through jq-mcp — queue compile/backtest batches, stream results, iterate. Use when the user asks to inspect or modify JoinQuant strategies/backtests, run ablations/sweeps, or set up a jq-mcp driver.
 ---
 
 # jq-mcp skill
 
-jq-mcp exposes a **logged-in JoinQuant browser session** as MCP tools. The server
-never calls JoinQuant directly; a browser extension (jqhelper) performs every
-action. Treat this skill as the operating manual for those tools.
+jq-mcp exposes a **logged-in JoinQuant browser session** as MCP tools and as a
+local HTTP event API. The extension (jqhelper) performs every browser action;
+jq-mcp owns the queue, concurrency, retries and result events.
 
-## When to use
+Read this before touching a strategy. The flow below is **queue-first**: compile
+and backtest are batches, results are events.
 
-Use when the user wants to, via jq-mcp:
-- check auth / bridge status,
-- read or edit strategy source,
-- compile-check and run backtests,
-- read backtest metrics / trades / positions / logs / monthly,
-- run **ablation / parameter sweeps** across many variants,
-- export strategy/backtest data locally, and clean up cloud artifacts.
+## 0. Mental model
 
-## Prerequisites (check first)
+```
+agent ──jq_batch_submit──► shared queue ──► jq-mcp workers ──► JoinQuant
+   ▲                                                        │
+   └──────── job.done / job.failed events (metrics+logs) ◄──┘
+```
 
-1. `jq_health` → must be `{"connected":true,"loggedIn":true}`.
-   - `connected:false` → the plugin isn't attached (user must open the browser /
-     enable jqhelper / fix token). Do NOT retry in a loop.
-   - `loggedIn:false` → call `jq_auth_open_login` and ask the user to log in.
+- You submit **jobs**, not individual runs.
+- The scheduler owns the concurrency cap, back-pressure and terminal waiting.
+- Results arrive as events. Wait for them either in the same turn
+  (`jq_batch_wait`) or in the next turn (`jq-loop`, default `wakeOn=stream`).
+- Compile runs are jobs too (`compile: true`). Never send code to a backtest
+  before its compile job passed.
 
-## Golden rules
+## 1. Preflight
 
-1. **Confirm before mutating.** `jq_strategy_save/clone/delete`, `jq_strategy_move`,
-   `jq_strategy_import`, `jq_backtest_cancel/delete`, `jq_file_write` require
-   `confirm=true`. Only pass it when the user approved.
-2. **Compile before backtesting.** Run `jq_strategy_compile` first; if it returns
-   `ok:false`, fix the code — do not spend a backtest on code that won't compile.
-3. **IDs rotate / need resolution.** JoinQuant edit ids change per request; resolve
-   by name via `jq_strategy_find`. Prefer the ids returned by the latest call.
-   The backtest `id` (detail) and `listId` (list) are different — use `listId` to delete.
-4. **Dates.** `YYYY-MM-DD`. The **end date must not be later than the previous
-   trading day** (today won't work). Use the last completed trading day.
-5. **Respect the concurrency cap.** JoinQuant allows few concurrent compile/backtests.
-   On rejection, `details.maxConcurrent` carries the number. Back off and retry
-   rather than firing everything at once. See `jq_account_limits`.
-6. **Don't leak secrets.** `jq_auth_get_cookie` / source code are sensitive; do not
-   echo them broadly. Don't log tokens.
-7. **Clean up** temporary strategies/backtests you created (ask first), unless the
-   user wants to keep them.
+```
+jq_health                         # {connected, loggedIn}; stop if false
+jq_account_limits                 # concurrency cap N (or learn it from rejection)
+```
 
-## Standard loops
+- `connected:false` → tell the user to open the browser/enable jqhelper/fix the
+  token. Do not retry in a loop.
+- `loggedIn:false` → `jq_auth_open_login`, ask the user to log in, then
+  `jq_auth_refresh`.
+- For next-turn iteration: jq-loop must be enabled (`/jq-loop on`) and jq-mcp must
+  be running with `--http-addr` (default `127.0.0.1:8792`).
+- Confirm before any mutation (`save/clone/delete/move/import`, `cancel/delete`,
+  `file_write`); never fabricate `confirm=true`.
 
-- Read-only inspect: `jq_health` → `jq_strategy_list` → `jq_backtest_list` →
-  `jq_backtest_stats`.
-- Edit + backtest: `jq_strategy_find` → `jq_strategy_get(includeCode)` → edit →
-  `jq_strategy_save(confirm)` → `jq_strategy_compile` → `jq_backtest_run` →
-  `jq_backtest_wait` / `jq_backtest_stats`.
-- Ablation: for each variant `jq_strategy_create` → `jq_strategy_compile` →
-  `jq_backtest_run` → collect `jq_backtest_stats`; finally delete variants.
+## 2. The flow
 
-## Automation / iteration
+### Phase A — variants
 
-- For multi-job runs prefer `jq_batch_submit` + `jq_batch_wait` (server-side
-  scheduler, concurrency/back-pressure owned by jq-mcp). Results arrive with
-  metrics in the terminal event; no per-job stats polling.
-- If the OpenCode `jq-loop` plugin is enabled (`/jq-loop on`), a finished batch
-  automatically wakes the originating session with a failure/metrics digest.
-  The plugin needs jq-mcp started with `--http-addr`.
-- Standalone scripts can use `clients/mjs/jq-mcp-client.mjs`; use
-  `startClient({url})` to attach to a running jq-mcp's HTTP API instead of
-  spawning a second one.
+Create or edit strategies and keep cloud name ↔ local file one-to-one. Record
+the intent in `trials.csv` **before** the first formal backtest. For sweeps:
+one variant per code change, unique `tag`.
 
-See `references/workflows.md` for step-by-step recipes and
-`references/tools.md` for every tool's parameters.
+### Phase B — compile batch (gate)
+
+```
+jq_batch_submit {
+  jobs: [
+    {tag:"c-v1", strategyId, start:"2024-01-02", end:"2024-01-10", compile:true},
+    ...
+  ]
+}
+```
+
+- Same turn: `jq_batch_wait {batchId}`.
+- Next turn: `/jq-loop on`; a `job.failed` arrives with `job.errorLogs`.
+- Compile jobs have no metrics; success = `status:"done"`, failure carries
+  `error`/`errorLogs`.
+- Fix failed variants and recompile. **Do not** submit a backtest for a variant
+  whose compile did not pass.
+
+### Phase C — backtest queue (over-subscribe)
+
+Submit **more jobs than the concurrency cap**: `cap + N`, not exactly `cap`.
+Queued jobs keep every slot busy while the model is thinking.
+
+```
+jq_batch_submit {
+  jobs: [ {tag:"v1-long", strategyId:"...", start:"2015-01-01", end:"...",
+           capital:100000, frequency:"day"}, ... ]
+}
+```
+
+- Same turn: `jq_batch_wait {batchId}` (one call; no sleep loop).
+- Next turn: `/jq-loop on` — default **stream** mode wakes on completed jobs
+  (500ms coalescing), **not** on `batch.done`. Record each result, then submit
+  replacements/next variants immediately; do not wait for the slowest job.
+- `batch.done` only means “this submission is drained”; it is not the iteration
+  barrier.
+- If a wake is missed or a client disconnects, resume with
+  `jq_batch_events {batchId, sinceEventId: nextEventId}` (or HTTP
+  `GET /api/batches/<id>/events?since=`).
+
+### Phase D — results
+
+Terminal events carry what you usually need:
+
+- `job.status`: `done` | `failed` | `timeout`
+- `job.metrics`: raw `backtest.stats` payload; the actual metrics are under
+  `job.metrics.metrics` (jq-loop digests already unwrap this)
+- `job.error`, `job.errorLogs`, `job.id`, `job.listId`, `job.taskId`
+
+Use `jq_backtest_stats` only when you need the raw payload again;
+`jq_backtest_logs {error:true}`, `trades`, `positions`, `monthly`, `result` for
+details. Export before cleanup when the result matters.
+
+### Phase E — cleanup
+
+Summarize locally, update `trials.csv`, then delete only this repo’s temporary
+strategies/backtests (ask first; prefer `listId` for deletion).
+
+## 3. Same-turn vs next-turn
+
+| Situation | Use |
+|---|---|
+| You need the result before writing the answer | `jq_batch_wait` (single blocking call) |
+| The turn can end; continue when results arrive | `/jq-loop on` (stream) |
+| External process / cron / audit | webhook (`callbackUrl`) or HTTP attach |
+| Client truncates long calls | `jq_batch_events` / HTTP events with `since` |
+
+`jq-loop` wakes only batches submitted **through MCP** (OpenCode puts the session
+id in `tools/call._meta["ai.opencode/sessionID"]`). Scripts submitting over HTTP
+without `sessionId` write results but do not wake a session.
+
+## 4. Drivers / scripts
+
+- Default: **attach** to the shared jq-mcp; do not spawn a second bridge:
+
+```js
+import { startClient } from "<jq-mcp>/clients/mjs/jq-mcp-client.mjs";
+const jq = await startClient({ url: "http://127.0.0.1:8792" });
+const runs = await jq.compileAll(variants);
+const results = await jq.runAll(jobs, { onJob: (r) => console.log(r.tag, r.status, r.metrics?.sharpe) });
+await jq.close();
+```
+
+- The extension connects to exactly one bridge (`ws://127.0.0.1:8790/ws`). If you
+  must self-spawn (different account/token), stop the OpenCode jq-mcp first and
+  release both `:8790` and `:8792` when done.
+- Use `jq_batch_submit`/`jq_batch_wait` (or the client above), never a hand-rolled
+  sleep/poll loop.
+
+## 5. Hard rules / anti-patterns
+
+- Never loop `jq_backtest_run` + `jq_backtest_stats` over a sweep.
+- Never `sleep` then poll; use `jq_batch_wait`, events, or `/jq-loop`.
+- Never submit exactly `cap` jobs and wait for all: over-subscribe and refill.
+- Never backtest uncompiled code.
+- Never retry a platform rejection blindly; read `details.maxConcurrent` and let
+  the scheduler back off.
+- `end` ≤ previous trading day. IDs rotate; resolve strategy ids by name.
+- Keep tokens/cookies/source out of reports and logs.
+- `useCredit: true` only when the user/team allows it; record it in `trials.csv`.
+
+See `references/workflows.md` for command-level recipes and
+`references/tools.md` for tool parameters.
