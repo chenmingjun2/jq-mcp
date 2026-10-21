@@ -128,7 +128,7 @@ jq-mcp proxy:
 ### 3.4 systemd 单元（示例）
 
 ```ini
-# ~/.config/systemd/user/jq-mcp.service
+# ~/.config/systemd/user/jq-mcp-server.service
 [Unit]
 Description=jq-mcp daemon (JoinQuant bridge)
 After=network.target
@@ -144,7 +144,7 @@ WantedBy=default.target
 ```
 
 - 需要「退出登录也常驻」时：`loginctl enable-linger $USER`（本机当前 `Linger=no`）。
-- 日志走 journal：`journalctl --user -u jq-mcp -f`。
+- 日志走 journal：`journalctl --user -u jq-mcp-server -f`。
 
 ---
 
@@ -208,7 +208,7 @@ jq-loop 无法唤醒。`POST /api/batches` 已支持 body/头两种方式，保�
 
 | 阶段 | 客户端配置 | 说明 |
 |---|---|---|
-| P1 | `{"type":"local","command":["jq-mcp","proxy"]}` | 兼容所有 MCP 客户端 |
+| P1 | `{"type":"local","command":["jq-mcp","proxy"]}`（服务名建议 `jq-mcp-proxy`） | 兼容所有 MCP 客户端 |
 | P2 | `{"type":"remote","url":"http://127.0.0.1:8792/mcp"}` | **推荐终点**，不 spawn 进程 |
 
 `/mcp`（Streamable HTTP，MCP 2025-03-26+）：
@@ -375,7 +375,7 @@ internal/httpapi/server.go  health 增加 daemonId/protocol/instances；X-JQ-Ses
 internal/mcp/server.go      HandleMessage（同步）、通知 sinks、WithSessionID
 internal/sched/*            Event.DaemonID + Scheduler.SetDaemonID
 plugins/jq-loop/index.ts    globalThis 单例、游标迁移、失败不推进游标
-deploy/jq-mcp.service.in    systemd --user 模板
+deploy/jq-mcp-server.service.in  systemd --user 模板
 ```
 
 ### 验证命令

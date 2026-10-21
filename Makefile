@@ -2,6 +2,7 @@ SHELL := /bin/bash
 BINARY := bin/jq-mcp
 EXT_DIR := extension
 DIST_EXT := dist/jqhelper.zip
+SERVICE := jq-mcp-server
 
 .PHONY: all build tidy test vet fmt run clean ext package ext-lint help install-service uninstall-service
 
@@ -35,15 +36,15 @@ run: build
 ## install-service: install a systemd --user unit that keeps the daemon running
 install-service: build
 	@mkdir -p $(HOME)/.config/systemd/user
-	@sed 's|@BIN@|$(CURDIR)/$(BINARY)|' deploy/jq-mcp.service.in > $(HOME)/.config/systemd/user/jq-mcp.service
+	@sed 's|@BIN@|$(CURDIR)/$(BINARY)|' deploy/$(SERVICE).service.in > $(HOME)/.config/systemd/user/$(SERVICE).service
 	@systemctl --user daemon-reload
-	@echo "installed. enable it with: systemctl --user enable --now jq-mcp"
+	@echo "installed. enable it with: systemctl --user enable --now $(SERVICE)"
 
 ## uninstall-service: remove the systemd --user unit (does not stop the daemon)
 uninstall-service:
-	@rm -f $(HOME)/.config/systemd/user/jq-mcp.service
+	@rm -f $(HOME)/.config/systemd/user/$(SERVICE).service
 	@systemctl --user daemon-reload
-	@echo "removed ~/.config/systemd/user/jq-mcp.service"
+	@echo "removed ~/.config/systemd/user/$(SERVICE).service"
 
 ## clean: remove build artifacts
 clean:

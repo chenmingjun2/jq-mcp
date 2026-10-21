@@ -64,22 +64,29 @@ bin/jq-mcp --version
 
 ### 4. 接入 MCP 客户端
 
-jq-mcp 使用 **stdio** 传输。以 OpenCode 为例，项目级 `opencode.json`：
+先起 daemon（见下节「运行模式」），再让客户端连上来。以 OpenCode 为例，项目级 `opencode.json`：
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
-      "jq-mcp": {
+      "jq-mcp-proxy": {
         "type": "local",
-        "command": ["/absolute/path/to/bin/jq-mcp",
-                    "--ws-addr", "127.0.0.1:8790",
-                    "--http-addr", "127.0.0.1:8792",
-                    "--token", "YOUR_TOKEN"]
+        "command": ["/absolute/path/to/bin/jq-mcp", "proxy"]
       }
     }
   }
+}
+```
+
+或直连 Streamable HTTP（不 spawn 进程）：
+
+```json
+"jq-mcp-proxy": {
+  "type": "remote",
+  "url": "http://127.0.0.1:8792/mcp",
+  "headers": { "Authorization": "Bearer YOUR_TOKEN" }
 }
 ```
 
@@ -109,7 +116,7 @@ jq-mcp 使用 **stdio** 传输。以 OpenCode 为例，项目级 `opencode.json`
 
 ```bash
 make build && make install-service
-systemctl --user enable --now jq-mcp
+systemctl --user enable --now jq-mcp-server
 # 需要“退出登录也常驻”时：
 # loginctl enable-linger $USER
 
@@ -125,7 +132,7 @@ jq-mcp stop            # 优雅停止
 {
   "mcp": {
     "servers": {
-      "jq-mcp": {
+      "jq-mcp-proxy": {
         "type": "remote",
         "url": "http://127.0.0.1:8792/mcp",
         "headers": { "Authorization": "Bearer <token>" }
@@ -141,7 +148,7 @@ jq-mcp stop            # 优雅停止
 {
   "mcp": {
     "servers": {
-      "jq-mcp": {
+      "jq-mcp-proxy": {
         "type": "local",
         "command": ["/path/to/jq-mcp/bin/jq-mcp", "proxy"]
       }

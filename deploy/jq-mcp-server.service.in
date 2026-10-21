@@ -1,5 +1,5 @@
 [Unit]
-Description=jq-mcp daemon (JoinQuant browser bridge)
+Description=jq-mcp server daemon (JoinQuant browser bridge)
 Documentation=https://github.com/jqhelper/jq-mcp
 After=network.target
 
