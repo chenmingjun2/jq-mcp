@@ -55,6 +55,7 @@ export function buildDigest({
   maxJobs = 30,
   maxErrorLines = 4,
   instructions = "",
+  phase = "batch", // batch | stream | job | failed
 }) {
   const results = (jobs || []).map(jobResult);
   const counts = { done: 0, failed: 0, timeout: 0 };
@@ -64,13 +65,15 @@ export function buildDigest({
   const done = results.filter((r) => r.status === "done");
   const lines = [];
 
+  const head =
+    phase === "batch" ? "已结束" : phase === "failed" ? "出现失败" : "有新结果";
   lines.push(
     maxIterations > 0
-      ? `[jq-loop] 批次 ${batchId} 已结束（第 ${iteration}/${maxIterations} 轮）`
-      : `[jq-loop] 批次 ${batchId} 已结束（第 ${iteration} 轮）`,
+      ? `[jq-loop] 批次 ${batchId} ${head}（第 ${iteration}/${maxIterations} 轮）`
+      : `[jq-loop] 批次 ${batchId} ${head}（第 ${iteration} 轮）`,
   );
   lines.push(
-    `任务 ${results.length} 个：done=${counts.done || 0} failed=${counts.failed || 0} timeout=${counts.timeout || 0}`,
+    `${phase === "batch" ? "任务" : "本次"} ${results.length} 个：done=${counts.done || 0} failed=${counts.failed || 0} timeout=${counts.timeout || 0}`,
   );
 
   if (failed.length) {

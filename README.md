@@ -222,7 +222,7 @@ jq_strategy_find(name) → jq_strategy_get(includeCode) → 修改源码
 不需要每任务轮询。用法与基准见 `clients/mjs/README.md`。
 
 ### 小步快跑（自动迭代）
-`plugins/jq-loop` 是 OpenCode V2 插件：订阅 jq-mcp 的 HTTP 事件流，在批次结束后用
+`plugins/jq-loop` 是 OpenCode V2 插件：订阅 jq-mcp 的 HTTP 事件流，在任务完成时（默认 stream）用
 `ctx.session.synthetic` 把结果摘要送回原会话，模型可立刻进入下一轮修复/调参。
 默认关闭，用 `/jq-loop on` 开启；需要 jq-mcp 以 `--http-addr` 启动。
 说明见 `plugins/jq-loop/README.md`。

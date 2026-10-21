@@ -13,9 +13,14 @@ const DEFAULTS = {
   enabled: false,
   url: "",
   token: "",
-  wakeOn: "batch", // batch | failed | job
-  maxIterations: 5,
-  cooldownMs: 5000,
+  // stream (default): wake as soon as results are available, coalescing a short
+  // burst; keeps free scheduler slots refilled instead of waiting for the
+  // slowest job in a batch. batch: wait for batch.done. failed: first failure.
+  // job: stream with no coalescing window.
+  wakeOn: "stream",
+  coalesceMs: 500,
+  maxIterations: 0, // 0 = unlimited; reset when the user sends a new prompt
+  cooldownMs: 0,
   maxJobs: 30,
   pollWaitSeconds: 20,
   instructions:
@@ -118,6 +123,7 @@ export default {
         maxIterations: Number(opt.maxIterations) || 0,
         maxJobs: Number(opt.maxJobs) || 30,
         instructions: opt.instructions,
+        phase: reason,
       });
       if (opt.dryRun) {
         console.log(`[jq-loop] dry-run (${reason}) session=${sessionID}\n${text}`);
@@ -153,9 +159,17 @@ export default {
         return;
       }
 
-      if (opt.wakeOn === "job" && isTerminalEvent(ev) && ev.job) {
-        const b = batchState(batchId);
-        b.woke = (await wake(sessionID, [ev.job], batchId, "job")) || b.woke;
+      // stream/job: deliver every completed job (coalesced for a short window)
+      // instead of waiting for the whole batch. This keeps the agent refilling
+      // freed scheduler slots while longer jobs are still running.
+      if (opt.wakeOn === "stream" || opt.wakeOn === "job") {
+        if (isTerminalEvent(ev) && ev.job) {
+          enqueueJob(ev);
+          return;
+        }
+        if (ev.type === "batch.done" && pendingResults.has(batchId)) {
+          await flushBatch(batchId);
+        }
         return;
       }
 
@@ -164,6 +178,38 @@ export default {
         if (b.woke) return;
         b.woke = await wake(sessionID, ev.jobs || [], batchId, "batch");
       }
+    }
+
+    // --- streaming wake-ups -------------------------------------------------
+    // A batch may contain jobs of very different durations. Waiting for
+    // batch.done idles every slot that finishes early, so the default mode
+    // reports finished jobs in small groups and lets the session submit the
+    // next jobs right away.
+    const pendingResults = new Map(); // batchId -> {sessionID, jobs:Map, timer}
+    const coalesceMs = Math.max(0, Number(opt.coalesceMs) || 0);
+    const windowMs = opt.wakeOn === "job" ? 0 : coalesceMs;
+
+    function enqueueJob(ev) {
+      if (!ev.job) return;
+      const key = ev.job.taskId || ev.job.id || String(ev.eventId);
+      let entry = pendingResults.get(ev.batchId);
+      if (!entry) {
+        entry = { sessionID: ev.sessionId, jobs: new Map(), timer: null };
+        pendingResults.set(ev.batchId, entry);
+      }
+      entry.jobs.set(key, ev.job);
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => {
+        void flushBatch(ev.batchId);
+      }, windowMs);
+    }
+
+    async function flushBatch(batchId) {
+      const entry = pendingResults.get(batchId);
+      if (!entry) return;
+      pendingResults.delete(batchId);
+      if (entry.timer) clearTimeout(entry.timer);
+      await wake(entry.sessionID, [...entry.jobs.values()], batchId, opt.wakeOn === "job" ? "job" : "stream");
     }
 
     // Reset the iteration budget when a human (or the agent) sends a prompt.
@@ -254,6 +300,12 @@ export default {
 
     // Only poll while enabled; `/jq-loop on` starts the loop lazily.
     if (state.enabled) startLoop();
-    return () => controller?.abort();
+    return () => {
+      controller?.abort();
+      for (const entry of pendingResults.values()) {
+        if (entry.timer) clearTimeout(entry.timer);
+      }
+      pendingResults.clear();
+    };
   },
 };
