@@ -318,6 +318,12 @@ func RunProxy(ctx context.Context, opts Options) error {
 	go relayNotifications(ctx, base, cfg.Token, logger)
 
 	reader := bufio.NewReaderSize(os.Stdin, 1<<20)
+	// Dispatch each JSON-RPC message in its own goroutine: a slow tool call
+	// (e.g. jq_backtest_get while the browser is busy) must not block the
+	// stdin loop, otherwise every later request (including jq_batch_submit)
+	// queues behind it. Responses are matched by JSON-RPC id; writes are
+	// serialized by writeStdout.
+	sem := make(chan struct{}, 16)
 	for {
 		select {
 		case <-ctx.Done():
@@ -326,12 +332,26 @@ func RunProxy(ctx context.Context, opts Options) error {
 		}
 		line, err := reader.ReadBytes('\n')
 		if len(strings.TrimSpace(string(line))) > 0 {
-			resp, rerr := postRPC(ctx, base, cfg.Token, line)
-			if rerr != nil {
-				logger.Error("转发失败", "err", rerr)
-			} else if len(resp) > 0 {
-				_ = writeStdout(append(resp, '\n'))
+			body := append([]byte(nil), line...)
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return nil
 			}
+			go func() {
+				defer func() { <-sem }()
+				resp, rerr := postRPC(ctx, base, cfg.Token, body)
+				if rerr != nil {
+					logger.Error("转发失败", "err", rerr)
+					if eb := errorResponse(body, rerr); len(eb) > 0 {
+						_ = writeStdout(append(eb, '\n'))
+					}
+					return
+				}
+				if len(resp) > 0 {
+					_ = writeStdout(append(resp, '\n'))
+				}
+			}()
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -340,6 +360,16 @@ func RunProxy(ctx context.Context, opts Options) error {
 			return err
 		}
 	}
+}
+
+// proxyHTTP is shared so concurrent forwards reuse connections instead of
+// opening a new TCP connection per call.
+var proxyHTTP = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:     90 * time.Second,
+	},
 }
 
 func postRPC(ctx context.Context, base, token string, body []byte) ([]byte, error) {
@@ -351,8 +381,7 @@ func postRPC(ctx context.Context, base, token string, body []byte) ([]byte, erro
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(req)
+	resp, err := proxyHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -368,6 +397,23 @@ func postRPC(ctx context.Context, base, token string, body []byte) ([]byte, erro
 		return nil, fmt.Errorf("daemon 返回 %s: %s", resp.Status, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+// errorResponse builds a JSON-RPC error frame for a request we could not
+// forward, so the client fails fast instead of waiting for its own timeout.
+func errorResponse(line []byte, err error) []byte {
+	var req struct {
+		ID any `json:"id"`
+	}
+	if json.Unmarshal(line, &req) != nil || req.ID == nil {
+		return nil
+	}
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"error":   map[string]any{"code": -32603, "message": err.Error()},
+	})
+	return b
 }
 
 // relayNotifications keeps an SSE subscription open and re-emits every message
