@@ -54,6 +54,10 @@ jq_batch_submit ──► jq-mcp 调度器 ──► /api/events (HTTP long-poll
 修改配置后重启 OpenCode 服务（`opencode service restart`）。插件默认 **关闭**，在会话里
 执行 `/jq-loop on` 才会自动唤醒；`/jq-loop off` 关闭，`/jq-loop status` 查看状态。
 
+> 全局安装：把同样的条目放到 `~/.config/opencode/opencode.jsonc` 的 `plugins` 里，
+> `package` 用绝对路径（例如 `/home/me/project/jq-mcp/plugins/jq-loop`）。本机已经这样安装，
+> 因此 `opencode2`（同一个 V2 二进制）在所有项目里都能用 `/jq-loop`。
+
 ## 选项
 
 | 选项 | 默认 | 说明 |
