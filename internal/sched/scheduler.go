@@ -60,6 +60,7 @@ type JobState struct {
 type Batch struct {
 	ID        string      `json:"batchId"`
 	CreatedAt time.Time   `json:"createdAt"`
+	SessionID string      `json:"sessionId,omitempty"` // originating OpenCode session (MCP _meta)
 	Jobs      []*JobState `json:"jobs"`
 	Callback  *Callback   `json:"callback,omitempty"`
 }
@@ -78,6 +79,7 @@ type SubmitOptions struct {
 	CallbackURL    string
 	CallbackSecret string
 	CallbackOn     string
+	SessionID      string
 }
 
 // WaitResult is returned by WaitEvents: a batch snapshot plus the events that
@@ -238,7 +240,11 @@ func (s *Scheduler) Submit(jobs []Job) *Batch {
 func (s *Scheduler) SubmitWithOptions(jobs []Job, opt SubmitOptions) *Batch {
 	s.mu.Lock()
 	s.seq++
-	b := &Batch{ID: "batch-" + time.Now().Format("20060102") + "-" + itoa(s.seq), CreatedAt: time.Now()}
+	b := &Batch{
+		ID:        "batch-" + time.Now().Format("20060102") + "-" + itoa(s.seq),
+		CreatedAt: time.Now(),
+		SessionID: opt.SessionID,
+	}
 	if opt.CallbackURL != "" {
 		on := opt.CallbackOn
 		if on == "" {
@@ -600,7 +606,7 @@ func (s *Scheduler) finishWithLogs(js *JobState, st, errMsg string, errLogs []st
 }
 
 func snapshot(b *Batch) *Batch {
-	cp := &Batch{ID: b.ID, CreatedAt: b.CreatedAt}
+	cp := &Batch{ID: b.ID, CreatedAt: b.CreatedAt, SessionID: b.SessionID}
 	if b.Callback != nil {
 		c := *b.Callback
 		cp.Callback = &c

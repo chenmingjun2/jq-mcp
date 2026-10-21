@@ -56,5 +56,17 @@ Use when the user wants to, via jq-mcp:
 - Ablation: for each variant `jq_strategy_create` → `jq_strategy_compile` →
   `jq_backtest_run` → collect `jq_backtest_stats`; finally delete variants.
 
+## Automation / iteration
+
+- For multi-job runs prefer `jq_batch_submit` + `jq_batch_wait` (server-side
+  scheduler, concurrency/back-pressure owned by jq-mcp). Results arrive with
+  metrics in the terminal event; no per-job stats polling.
+- If the OpenCode `jq-loop` plugin is enabled (`/jq-loop on`), a finished batch
+  automatically wakes the originating session with a failure/metrics digest.
+  The plugin needs jq-mcp started with `--http-addr`.
+- Standalone scripts can use `clients/mjs/jq-mcp-client.mjs`; use
+  `startClient({url})` to attach to a running jq-mcp's HTTP API instead of
+  spawning a second one.
+
 See `references/workflows.md` for step-by-step recipes and
 `references/tools.md` for every tool's parameters.

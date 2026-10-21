@@ -58,6 +58,9 @@ bin/jq-mcp --version
 - 点 **保存并重连**
 
 > 也可用 `--token <token>` 与 `--ws-addr <host:port>` 覆盖。
+>
+> 需要插件/脚本共享同一个 jq-mcp 时，再加 `--http-addr 127.0.0.1:8791`：
+> 提供批次提交、跨批次事件长轮询与工具代理（见 `docs/protocol.md` §3）。
 
 ### 4. 接入 MCP 客户端
 
@@ -72,6 +75,7 @@ jq-mcp 使用 **stdio** 传输。以 OpenCode 为例，项目级 `opencode.json`
         "type": "local",
         "command": ["/absolute/path/to/bin/jq-mcp",
                     "--ws-addr", "127.0.0.1:8790",
+                    "--http-addr", "127.0.0.1:8791",
                     "--token", "YOUR_TOKEN"]
       }
     }
@@ -213,6 +217,16 @@ jq_strategy_find(name) → jq_strategy_get(includeCode) → 修改源码
 对每个变体：`jq_strategy_create`（带变体代码）→ `jq_strategy_compile` → `jq_backtest_run` → 收集 `stats`。
 最后 `jq_strategy_delete(confirm)` 清理。受**账号并发上限**约束（见下）。
 
+脚本化大批量扫描可以用 Node 客户端 `clients/mjs/jq-mcp-client.mjs`：单进程常驻、
+`jq_batch_submit` 投递、`jq_batch_events` 游标实时收结果，指标随 `job.done` 一起返回，
+不需要每任务轮询。用法与基准见 `clients/mjs/README.md`。
+
+### 小步快跑（自动迭代）
+`plugins/jq-loop` 是 OpenCode V2 插件：订阅 jq-mcp 的 HTTP 事件流，在批次结束后用
+`ctx.session.synthetic` 把结果摘要送回原会话，模型可立刻进入下一轮修复/调参。
+默认关闭，用 `/jq-loop on` 开启；需要 jq-mcp 以 `--http-addr` 启动。
+说明见 `plugins/jq-loop/README.md`。
+
 ### 云端策略导出到本地
 ```
 jq_strategy_export(strategyId, path="./x.py")      # format=py|json
@@ -297,10 +311,12 @@ jq_backtest_export(backtestId, path="./bt.json")   # sections=stats,result,trade
 jq-mcp/
 ├── cmd/jq-mcp/                 # 入口
 ├── internal/
-│   ├── apierr/  bridge/  browser/  config/  jq/  mcp/  task/  app/
+│   ├── apierr/  bridge/  browser/  config/  httpapi/  jq/  mcp/  task/  app/
 ├── extension/                  # jqhelper（MV3，无需构建）
 │   ├── manifest.json  background.js
 │   ├── lib/  handlers/  page/  options.html
+├── clients/mjs/                # Node ESM 编译/回测客户端（spawn/attach）
+├── plugins/jq-loop/            # OpenCode V2 自动迭代插件
 ├── .opencode/skills/jq-mcp/    # OpenCode skill（辅助 AI 使用）
 ├── docs/{architecture,protocol}.md
 └── Makefile

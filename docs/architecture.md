@@ -172,6 +172,7 @@ Task {
 |------|------|
 | `job.started` | 任务被工作线程取走并提交 |
 | `job.done` / `job.failed` / `job.timeout` | 任务终结 |
+| `batch.done` | 批次内所有任务终结 |
 
 轮询阶段每个周期先读错误日志：出现错误时任务直接 `failed`（`errorLogs`
 随事件一起下发），立即产生 `job.failed`，批次内全部终结时再产生
@@ -181,19 +182,24 @@ Task {
 改用编译列表（`backtest.list?compile=1`）：优先按 `backtest.run` 返回的
 `id` / `listId` 精确匹配，匹配不到时在宽限期后用“无运行中 + 已有终态”
 兜底，避免成功编译也空等到 `jobTimeout`。
-| `batch.done` | 批次内所有任务终结 |
 
-事件有两个出口：
+事件有三个出口：
 
 1. **MCP 通知**：终结事件以 `notifications/message` 推给客户端；带
    `_meta.progressToken` 的等待调用还会收到 `notifications/progress`。
 2. **Webhook**：`jq_batch_submit` 可带 `callbackUrl`，异步 POST 事件 JSON，
    支持 HMAC-SHA256 签名（绑定时间戳与 body）、幂等 `X-JQ-Delivery`、
    指数退避重试。回调在独立 goroutine 中执行，不占用调度工作线程。
+3. **本地 HTTP API**：`--http-addr` 启动，提供跨批次事件长轮询
+   （`/api/events?since=&wait=`）、批次状态与工具代理。它给常驻消费者
+   （OpenCode jq-loop 插件、attach 模式客户端）使用，不占用浏览器桥端口。
 
-MCP 协议不允许服务端主动发起 tool 调用，因此“回调唤醒 agent”不可实现；
-agent 侧的正确形态是单次阻塞 `jq_batch_wait`，超时后用 `jq_batch_events`
-的 `sinceEventId` 游标续读。Webhook 面向外部脚本与服务。
+MCP 协议不允许服务端主动发起 tool 调用，MCP 通知也不会触发模型轮次。
+要在 agent 回合结束后“唤醒模型”，需要 OpenCode 插件（`plugins/jq-loop`）
+消费 HTTP 事件流，再调用 `ctx.session.synthetic(delivery="queue")`。
+事件里的 `sessionId` 由 OpenCode 的 `tools/call._meta["ai.opencode/sessionID"]`
+透传而来，插件据此把结果送回对应会话；通过 CLI/HTTP 直接提交且不带
+`sessionId` 的批次不会唤醒任何会话。
 
 ---
 

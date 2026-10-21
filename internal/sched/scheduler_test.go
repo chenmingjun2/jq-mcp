@@ -276,3 +276,47 @@ func TestProcessCompileJobFallbackWhenIdsRotate(t *testing.T) {
 		t.Fatalf("status = %q, want %q (error=%q)", js.Status, StDone, js.Error)
 	}
 }
+
+func TestAllEventsAcrossBatches(t *testing.T) {
+	s := testScheduler()
+	b1 := s.SubmitWithOptions([]Job{{Tag: "a", StrategyID: "s1", Start: "2024-01-01"}}, SubmitOptions{SessionID: "ses_1"})
+	b2 := s.SubmitWithOptions([]Job{{Tag: "b", StrategyID: "s2", Start: "2024-01-01"}}, SubmitOptions{SessionID: "ses_2"})
+	s.start(b1.Jobs[0])
+	s.finish(b1.Jobs[0], StDone, "")
+	s.start(b2.Jobs[0])
+	s.finish(b2.Jobs[0], StDone, "")
+
+	evs, next, more := s.AllEvents(0, 100)
+	if more || next != s.LastEventID() {
+		t.Fatalf("more=%v next=%d last=%d", more, next, s.LastEventID())
+	}
+	if len(evs) != 6 {
+		t.Fatalf("events = %d, want 6", len(evs))
+	}
+	for i := 1; i < len(evs); i++ {
+		if evs[i-1].ID >= evs[i].ID {
+			t.Fatalf("events not sorted: %d then %d", evs[i-1].ID, evs[i].ID)
+		}
+	}
+	if evs[0].SessionID != "ses_1" || evs[len(evs)-1].SessionID != "ses_2" {
+		t.Fatalf("session ids not propagated: %q..%q", evs[0].SessionID, evs[len(evs)-1].SessionID)
+	}
+
+	// Cursor read returns only newer events.
+	tail, next2, _ := s.AllEvents(evs[2].ID, 1)
+	if len(tail) != 1 || tail[0].ID != evs[3].ID || next2 != evs[3].ID || tail[0].Type != EvJobDone && tail[0].Type != EvJobStarted {
+		t.Fatalf("cursor read = %+v next=%d", tail, next2)
+	}
+
+	// Long poll returns immediately when events are available.
+	got, _, _ := s.NextAllEvents(context.Background(), 0, time.Second, 100)
+	if len(got) != 6 {
+		t.Fatalf("long poll = %d events", len(got))
+	}
+
+	start := time.Now()
+	empty, _, _ := s.NextAllEvents(context.Background(), s.LastEventID(), 60*time.Millisecond, 100)
+	if len(empty) != 0 || time.Since(start) < 40*time.Millisecond {
+		t.Fatalf("expected an empty wait, got %d events after %v", len(empty), time.Since(start))
+	}
+}

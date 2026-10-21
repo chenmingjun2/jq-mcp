@@ -32,6 +32,7 @@ type Browser struct {
 type Config struct {
 	WSAddr   string  `json:"ws_addr"`
 	WSPath   string  `json:"ws_path"`
+	HTTPAddr string  `json:"http_addr,omitempty"`
 	Token    string  `json:"token"`
 	TaskFile string  `json:"task_file"`
 	Browser  Browser `json:"browser"`

@@ -92,3 +92,37 @@ func TestToolsCallProgressNotification(t *testing.T) {
 		t.Fatalf("bad progress notification: %s", out.String())
 	}
 }
+
+func TestSessionIDFromMCPMeta(t *testing.T) {
+	s, pw, out, stop := startTestServer(t)
+	defer stop()
+
+	s.Register(Tool{
+		Name: "probe",
+		Handler: func(ctx context.Context, _ json.RawMessage) (any, error) {
+			return map[string]string{"sessionId": SessionIDFromContext(ctx)}, nil
+		},
+	})
+	fmt.Fprintln(pw, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"probe","arguments":{},"_meta":{"ai.opencode/sessionID":"ses_123"}}}`)
+	waitContains(t, out, `ses_123`)
+}
+
+func TestCallToolSynchronous(t *testing.T) {
+	s := NewServer("test", "0", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.Register(Tool{
+		Name: "echo",
+		Handler: func(_ context.Context, args json.RawMessage) (any, error) {
+			return map[string]any{"args": string(args)}, nil
+		},
+	})
+	out, err := s.CallTool(context.Background(), "echo", json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["args"] != `{"x":1}` {
+		t.Fatalf("result = %v", out)
+	}
+	if _, err := s.CallTool(context.Background(), "missing", nil); err == nil {
+		t.Fatal("expected an error for an unknown tool")
+	}
+}

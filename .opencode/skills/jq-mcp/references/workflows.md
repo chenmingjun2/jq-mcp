@@ -77,6 +77,13 @@ If you need an external process to react, pass `callbackUrl` (and optionally
 events with retries. MCP cannot wake the agent, so `jq_batch_wait` remains the
 agent-side primitive.
 
+For true asynchronous iteration (agent turn already ended), use the OpenCode
+`jq-loop` plugin: jq-mcp's HTTP event feed (`--http-addr`) is consumed by the
+plugin, which calls `session.synthetic` to wake the same session with a result
+digest. Enable it per session with `/jq-loop on`. Standalone scripts can use
+`clients/mjs/jq-mcp-client.mjs` in attach mode (`startClient({url})`) against the
+same HTTP API.
+
 To get an instrument's listing date, run a tiny strategy whose `initialize` logs
 `get_security_info(code).start_date`, then read `jq_backtest_logs`.
 

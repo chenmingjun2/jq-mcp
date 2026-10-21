@@ -2,6 +2,7 @@ package sched
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,12 +22,13 @@ const (
 // Event is one entry in a batch's lifecycle log. Job is set for job.* events;
 // Jobs is set for batch.done. Both are snapshots taken at emit time.
 type Event struct {
-	ID      int64       `json:"eventId"`
-	Type    string      `json:"type"`
-	BatchID string      `json:"batchId"`
-	At      time.Time   `json:"at"`
-	Job     *JobState   `json:"job,omitempty"`
-	Jobs    []*JobState `json:"jobs,omitempty"`
+	ID        int64       `json:"eventId"`
+	Type      string      `json:"type"`
+	BatchID   string      `json:"batchId"`
+	SessionID string      `json:"sessionId,omitempty"`
+	At        time.Time   `json:"at"`
+	Job       *JobState   `json:"job,omitempty"`
+	Jobs      []*JobState `json:"jobs,omitempty"`
 }
 
 // Events returns the events for a batch with ID > since, oldest first. limit<=0
@@ -155,9 +157,82 @@ func (s *Scheduler) probe(batchID string, since int64) (*Batch, []Event, int64, 
 // itself is always complete, so a truncated tail can be fetched by cursor.
 const maxWaitEvents = 500
 
+// AllEvents returns events across every batch with ID > since, oldest first.
+// It backs the local HTTP event feed used by external orchestrators (the
+// OpenCode jq-loop plugin), which must not miss events from any batch.
+func (s *Scheduler) AllEvents(since int64, limit int) ([]Event, int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allEventsLocked(since, limit)
+}
+
+// NextAllEvents long-polls the cross-batch event feed: it returns as soon as at
+// least one event newer than since exists, or when timeout elapses.
+func (s *Scheduler) NextAllEvents(ctx context.Context, since int64, timeout time.Duration, limit int) ([]Event, int64, bool) {
+	deadline := time.Now().Add(timeout)
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		s.mu.Lock()
+		evs, next, more := s.allEventsLocked(since, limit)
+		ch := s.eventCh
+		s.mu.Unlock()
+		if len(evs) > 0 || !time.Now().Before(deadline) {
+			return evs, next, more
+		}
+		timer := time.NewTimer(time.Until(deadline))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, since, false
+		case <-ch:
+			timer.Stop()
+		case <-heartbeat.C:
+			timer.Stop()
+		case <-timer.C:
+			timer.Stop()
+		}
+	}
+}
+
+// LastEventID returns the newest event sequence number.
+func (s *Scheduler) LastEventID() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.eventSeq
+}
+
+func (s *Scheduler) allEventsLocked(since int64, limit int) ([]Event, int64, bool) {
+	if limit <= 0 || limit > maxWaitEvents {
+		limit = maxWaitEvents
+	}
+	var all []Event
+	for _, evs := range s.events {
+		for _, ev := range evs {
+			if ev.ID > since {
+				all = append(all, ev)
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+	next := since
+	more := false
+	if len(all) > limit {
+		all = all[:limit]
+		more = true
+	}
+	if len(all) > 0 {
+		next = all[len(all)-1].ID
+	}
+	return all, next, more
+}
+
 func (s *Scheduler) appendEventLocked(typ, batchID string, js *JobState, jobs []*JobState) Event {
 	s.eventSeq++
 	ev := Event{ID: s.eventSeq, Type: typ, BatchID: batchID, At: time.Now()}
+	if b, ok := s.batches[batchID]; ok {
+		ev.SessionID = b.SessionID
+	}
 	if js != nil {
 		cp := *js
 		ev.Job = &cp

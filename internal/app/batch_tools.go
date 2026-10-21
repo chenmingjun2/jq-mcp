@@ -71,6 +71,7 @@ func registerBatchTools(s *mcp.Server, d deps) {
 				CallbackURL:    a.CallbackURL,
 				CallbackSecret: a.CallbackSecret,
 				CallbackOn:     a.CallbackOn,
+				SessionID:      mcp.SessionIDFromContext(ctx),
 			})
 			// Read a snapshot: workers may start mutating job state immediately.
 			snap, err := d.sched.Status(b.ID)

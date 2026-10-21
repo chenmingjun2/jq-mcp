@@ -102,3 +102,18 @@ Tool errors are JSON in the text part: `{"error":{"code","message","details"}}`.
 Codes: `no_extension`, `not_authenticated`, `not_found`, `usage_error`,
 `api_error`, `network_error`, `timeout`, `internal_error`.
 `api_error.details.maxConcurrent` is set when the concurrency cap is hit.
+
+## Local HTTP API (non-MCP)
+
+Enabled with `--http-addr 127.0.0.1:8791`. `/api/*` requires the bridge token
+(`Authorization: Bearer`, `X-JQ-Token`, or `?token=`); `/healthz` is open.
+
+- `POST /api/batches` — same scheduler submit shape as `jq_batch_submit`
+  (`jobs`, `maxConcurrent?`, `callback*`, `sessionId?`).
+- `GET /api/batches[/{id}]` — batch snapshots with `counts`/`done`.
+- `GET /api/batches/{id}/events?since=&wait=&limit=` — per-batch cursor events.
+- `GET /api/events?since=&wait=&limit=` — cross-batch cursor events (used by the
+  OpenCode `jq-loop` plugin).
+- `POST /api/tools/{name}` — synchronous tool proxy (`{"arguments":{...}}`).
+
+See `docs/protocol.md` §3 for response shapes.

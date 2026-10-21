@@ -212,7 +212,38 @@ MCP 通知：
 
 ---
 
-## 3. 兼容与演进
+## 3. 本地 HTTP API
+
+启用：`jq-mcp --http-addr 127.0.0.1:8791`（或配置 `http_addr`）。仅建议监听回环地址；
+所有 `/api/*` 需要 token，支持 `Authorization: Bearer <token>`、`X-JQ-Token: <token>`
+或 `?token=<token>`。`/healthz` 不需要鉴权。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/healthz` | `{ok,version,connected,cap,lastEventId}` |
+| POST | `/api/tools/{name}` | body `{"arguments":{...}}`，同步调用任意 MCP 工具 |
+| POST | `/api/batches` | body `{jobs,maxConcurrent?,callbackUrl?,callbackSecret?,callbackOn?,sessionId?}`，提交批次 |
+| GET | `/api/batches?limit=20` | 最近批次 |
+| GET | `/api/batches/{id}` | 批次快照（`counts`/`done`/`jobs`） |
+| GET | `/api/batches/{id}/events?since=&wait=20&limit=200` | 单批次事件长轮询 |
+| GET | `/api/events?since=&wait=20&limit=200` | **跨批次**事件长轮询（jq-loop 插件使用） |
+
+事件响应：
+
+```json
+{"events":[{"eventId":12,"type":"batch.done","batchId":"...","sessionId":"ses_...",
+            "at":"...","jobs":[...]}],
+ "nextEventId":12,"hasMore":false}
+```
+
+- `since` 是游标；服务端保留本进程内的事件日志，支持补发。
+- `wait` 秒内无新事件时阻塞，`0` 表示立即返回；上限 60s。
+- `sessionId` 来自 OpenCode MCP `tools/call._meta["ai.opencode/sessionID"]`（或提交时显式传入）。
+- 事件类型：`job.started` / `job.done` / `job.failed` / `job.timeout` / `batch.done`。
+
+---
+
+## 4. 兼容与演进
 
 - 桥协议新增字段必须向后兼容；未知方法返回 `usage_error`。
 - MCP 工具名稳定；新增能力以新工具形式加入。

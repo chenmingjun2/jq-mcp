@@ -16,6 +16,7 @@ import (
 	"github.com/jqhelper/jq-mcp/internal/bridge"
 	"github.com/jqhelper/jq-mcp/internal/browser"
 	"github.com/jqhelper/jq-mcp/internal/config"
+	"github.com/jqhelper/jq-mcp/internal/httpapi"
 	"github.com/jqhelper/jq-mcp/internal/jq"
 	"github.com/jqhelper/jq-mcp/internal/mcp"
 	"github.com/jqhelper/jq-mcp/internal/sched"
@@ -23,12 +24,13 @@ import (
 )
 
 // Version is the server version reported during MCP initialize.
-const Version = "0.2.1"
+const Version = "0.3.0"
 
 // Options are the resolved command-line overrides.
 type Options struct {
 	ConfigPath     string
 	WSAddr         string
+	HTTPAddr       string
 	Token          string
 	BrowserMode    string
 	Headless       *bool
@@ -178,7 +180,52 @@ func Run(ctx context.Context, opts Options) error {
 	registerTools(server, d)
 	registerBatchTools(server, d)
 
+	// Optional local HTTP API: scheduler control + a cross-batch event feed for
+	// long-lived consumers (OpenCode jq-loop plugin, attach-mode clients).
+	if cfg.HTTPAddr != "" {
+		handler := httpapi.New(httpapi.Options{
+			Version:   Version,
+			Token:     cfg.Token,
+			Scheduler: sch,
+			Tools:     server,
+			Connected: hub.Connected,
+			Logger:    logger,
+		})
+		apiLn, err := net.Listen("tcp", cfg.HTTPAddr)
+		if err != nil {
+			return fmt.Errorf("监听 HTTP API %s 失败: %w", cfg.HTTPAddr, err)
+		}
+		apiServer := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := apiServer.Serve(apiLn); err != nil && err != http.ErrServerClosed {
+				logger.Error("HTTP API 退出", "addr", cfg.HTTPAddr, "err", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = apiServer.Shutdown(shutdownCtx)
+		}()
+		logger.Info("HTTP API 已启动", "addr", cfg.HTTPAddr, "auth", "token")
+		if !loopbackAddr(cfg.HTTPAddr) {
+			logger.Warn("HTTP API 监听非回环地址，请确认网络边界与 token 安全", "addr", cfg.HTTPAddr)
+		}
+	}
+
 	return server.Run(ctx, os.Stdin, os.Stdout)
+}
+
+// loopbackAddr reports whether a listen address is bound to loopback.
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	switch host {
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return true
+	}
+	return false
 }
 
 // bridgeURL builds the extension-facing websocket URL from a listen address.
@@ -199,6 +246,9 @@ func bridgeURL(addr, path string) string {
 func applyOverrides(cfg *config.Config, o Options) {
 	if o.WSAddr != "" {
 		cfg.WSAddr = o.WSAddr
+	}
+	if o.HTTPAddr != "" {
+		cfg.HTTPAddr = o.HTTPAddr
 	}
 	if o.Token != "" {
 		cfg.Token = o.Token

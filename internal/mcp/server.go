@@ -94,6 +94,16 @@ func ProgressFromContext(ctx context.Context) ProgressFunc {
 	return func(float64, float64, string) {}
 }
 
+type sessionKey struct{}
+
+// SessionIDFromContext returns the invoking client's session identifier when
+// the transport provides one. OpenCode sends it in MCP
+// tools/call._meta["ai.opencode/sessionID"].
+func SessionIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(sessionKey{}).(string)
+	return v
+}
+
 // Run processes messages until the reader is exhausted or ctx is cancelled.
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.outMu.Lock()
@@ -211,7 +221,8 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 		return nil, &rpcError{Code: -32602, Message: "tools/call 参数无效"}
 	}
 	var meta struct {
-		ProgressToken any `json:"progressToken"`
+		ProgressToken any    `json:"progressToken"`
+		SessionID     string `json:"ai.opencode/sessionID"`
 	}
 	_ = json.Unmarshal(p.Meta, &meta)
 	if meta.ProgressToken != nil {
@@ -223,6 +234,9 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 				"message":       message,
 			})
 		}))
+	}
+	if meta.SessionID != "" {
+		ctx = context.WithValue(ctx, sessionKey{}, meta.SessionID)
 	}
 	s.mu.RLock()
 	tool := s.tools[p.Name]
@@ -239,6 +253,22 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (a
 		return toolError(apierr.From(err)), nil
 	}
 	return toolSuccess(result), nil
+}
+
+// CallTool invokes a registered tool synchronously. The stdio loop dispatches
+// asynchronously; this entry point is for local in-process transports such as
+// the HTTP API.
+func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage) (any, error) {
+	s.mu.RLock()
+	tool := s.tools[name]
+	s.mu.RUnlock()
+	if tool == nil {
+		return nil, apierr.Usage("未知工具: %s", name)
+	}
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	return tool.Handler(ctx, args)
 }
 
 func toolSuccess(result any) map[string]any {
