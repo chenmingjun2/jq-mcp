@@ -23,11 +23,11 @@ const DEFAULTS = {
   // burst; keeps free scheduler slots refilled instead of waiting for the
   // slowest job in a batch. batch: wait for batch.done. failed: first failure.
   // job: stream with no coalescing window.
-  wakeOn: "stream",
-  coalesceMs: 500,
-  // queue: 等当前回合结束再投递（不打断工具）；steer: 立即插入（会打断正在执行的工具）。
-  // 追求最小延迟用 steer；活动回合若已在 jq_batch_wait 上阻塞，steer 会中断该等待。
-  delivery: "queue",
+  // 完全实时：任一 job 终结即唤醒、不做合并、steer 立即插入。
+  // 代价：会打断正在执行的工具（包括 jq_batch_wait）。
+  wakeOn: "job",
+  coalesceMs: 0,
+  delivery: "steer",
   maxIterations: 0, // 0 = unlimited; reset when the user sends a new prompt
   cooldownMs: 0,
   maxJobs: 30,
