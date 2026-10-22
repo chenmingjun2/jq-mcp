@@ -1598,7 +1598,8 @@ func (s *Scheduler) snapshotWithProgressLocked(b *Batch) *Batch {
 	var all []hist
 	for _, bb := range s.batches {
 		for _, js := range bb.Jobs {
-			if js.Status != StDone || js.StartedAt.IsZero() || js.EndedAt.IsZero() {
+			if js.Status != StDone || js.Compile || js.StartedAt.IsZero() || js.EndedAt.IsZero() {
+				// 编译任务只跑 10 天，不能当作“秒/模拟年”的样本
 				continue
 			}
 			years := windowYears(js.Start, js.End)
