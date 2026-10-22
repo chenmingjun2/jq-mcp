@@ -135,6 +135,24 @@ OpenCode 会为**每个 workspace** 调一次 `setup()`，但所有 workspace �
 - **重启**：插件重启后从 storage 里的游标继续。
 - **不会唤醒**：通过脚本/HTTP 提交且没有 `sessionId` 的批次（例如 mjs CLI 的扫参）。
 
+
+## 延迟语义：jq-loop vs epoll 式 wait
+
+- **事件采集是实时的**：daemon 的 `GET /api/events?wait=N` 阻塞在 scheduler 的 `eventCh` 上，
+  有新事件立即返回；插件也是长轮询，采集端没有延迟。
+- **唤醒投递才是延迟来源**：`ctx.session.synthetic({delivery:"queue"})` 是“排队到当前回合结束”，
+  agent 连续调用工具时回合不结束，唤醒就会被推迟（实测数分钟）。这不是事件丢失，游标仍会推进。
+- **活动回合请用 `jq_batch_wait`**：
+  ```text
+  jq_batch_events {batchId, sinceEventId:0}        -> nextEventId = C
+  jq_batch_wait   {batchId, sinceEventId:C}        -> 任一 job 终结即返回（服务端阻塞，毫秒级）
+  ```
+  实测：3 个 2 年回测，第一个完成的瞬间 14.8s 返回；剩余两个在第二次调用中一并返回。
+  该调用不经过浏览器/扩展，不会阻塞串行 proxy。
+- **jq-loop 的定位**：会话停下来（回合结束）后的兜底唤醒；两者互补。
+  若确实需要“打断当前回合”，可把 `wake()` 的 `delivery` 改为 `"steer"`（见 SDK 的
+  `delivery: "steer" | "queue"`），但会中断正在执行的工具调用，默认不建议。
+
 ## 测试
 
 纯逻辑有 Node 测试：
