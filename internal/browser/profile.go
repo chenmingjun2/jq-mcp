@@ -114,6 +114,10 @@ func (p *Profile) Launch(bin string, headless bool, log *slog.Logger) (int, erro
 		"--load-extension=" + p.Ext,
 		"--no-first-run",
 		"--no-default-browser-check",
+		// Ephemeral CDP port: Playwright can attach for the manual login step.
+		// Chrome writes the chosen port to <user-data-dir>/DevToolsActivePort.
+		"--remote-debugging-port=0",
+		"--remote-debugging-address=127.0.0.1",
 	}
 	features := "Translate"
 	if p.UserAgent != "" {
