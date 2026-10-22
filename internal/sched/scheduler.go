@@ -853,15 +853,9 @@ func (s *Scheduler) pickAccountLocked(js *JobState, now time.Time) *acctState {
 	if len(s.accounts) == 0 {
 		return nil
 	}
-	creditOK := func(a *acctState) bool {
-		if !js.UseCredit || !a.creditsKnown {
-			return true
-		}
-		return a.credits > 0
-	}
 	if js.Account != "" {
 		a := s.accounts[js.Account]
-		if a != nil && a.usable(now, js.UseCredit) && creditOK(a) {
+		if a != nil && a.usable(now, js.UseCredit) {
 			return a
 		}
 		return nil
@@ -870,7 +864,7 @@ func (s *Scheduler) pickAccountLocked(js *JobState, now time.Time) *acctState {
 	// account (or the single configured account) can be assumed to own it.
 	if js.StrategyID != "" && js.Code == "" && js.CodePath == "" {
 		a := s.accounts[s.defaultAlias]
-		if a != nil && a.usable(now, js.UseCredit) && creditOK(a) {
+		if a != nil && a.usable(now, js.UseCredit) {
 			return a
 		}
 		return nil
@@ -880,7 +874,7 @@ func (s *Scheduler) pickAccountLocked(js *JobState, now time.Time) *acctState {
 	}
 	if js.Placement == "sticky" && js.StrategyKey != "" {
 		if owner, ok := s.sticky[js.StrategyKey]; ok {
-			if a := s.accounts[owner]; a != nil && a.usable(now, js.UseCredit) && creditOK(a) {
+			if a := s.accounts[owner]; a != nil && a.usable(now, js.UseCredit) {
 				return a
 			}
 		}
@@ -888,7 +882,7 @@ func (s *Scheduler) pickAccountLocked(js *JobState, now time.Time) *acctState {
 	var best *acctState
 	bestFree := -1
 	for _, a := range s.accounts {
-		if !a.usable(now, js.UseCredit) || !creditOK(a) {
+		if !a.usable(now, js.UseCredit) {
 			continue
 		}
 		free := a.cap - a.inFlight
