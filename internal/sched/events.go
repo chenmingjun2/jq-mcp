@@ -154,7 +154,7 @@ func (s *Scheduler) probe(batchID string, since int64) (*Batch, []Event, int64, 
 		next = out[len(out)-1].ID
 		more = true
 	}
-	return snapshot(b), out, next, more, s.eventCh, nil
+	return s.snapshotWithProgressLocked(b), out, next, more, s.eventCh, nil
 }
 
 // maxWaitEvents caps the event payload of a wait/follow response. Batch state

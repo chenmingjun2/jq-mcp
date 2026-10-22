@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -74,6 +75,9 @@ type JobState struct {
 	ErrorLogs      []string        `json:"errorLogs,omitempty"`
 	StartedAt      time.Time       `json:"startedAt,omitempty"`
 	EndedAt        time.Time       `json:"endedAt,omitempty"`
+	// Progress is a best-effort ETA for running jobs; nil when there is not
+	// enough history to learn a rate.
+	Progress *ProgressEstimate `json:"progress,omitempty"`
 
 	assigned         *acctState
 	queuedAt         time.Time
@@ -81,6 +85,21 @@ type JobState struct {
 	portable         bool
 	pinned           bool
 	needsCreditPause bool
+}
+
+// ProgressEstimate is a best-effort progress/ETA for a running job. JoinQuant
+// exposes no simulation-date watermark while a backtest runs (the result and
+// dayResult endpoints are empty, and the page's progress bar is computed
+// client-side), so the only real signal is elapsed time. This estimate learns
+// median seconds per simulated year from the daemon's completed jobs,
+// preferring the same strategyKey, and extrapolates to the job's window.
+type ProgressEstimate struct {
+	ElapsedSeconds   float64 `json:"elapsedSeconds"`
+	EstimatedSeconds float64 `json:"estimatedSeconds"`
+	Percent          float64 `json:"percent"`
+	EtaSeconds       float64 `json:"etaSeconds"`
+	Basis            string  `json:"basis"` // strategyKey | global
+	Samples          int     `json:"samples"`
 }
 
 // Batch groups submitted jobs.
@@ -735,7 +754,7 @@ func (s *Scheduler) Status(batchID string) (*Batch, error) {
 	if !ok {
 		return nil, apierr.New(apierr.CodeNotFound, "批次 %s 不存在", batchID)
 	}
-	return snapshot(b), nil
+	return s.snapshotWithProgressLocked(b), nil
 }
 
 // List returns the most recent batches (newest first).
@@ -745,7 +764,7 @@ func (s *Scheduler) List(limit int) []*Batch {
 	out := make([]*Batch, 0, len(s.order))
 	for i := len(s.order) - 1; i >= 0; i-- {
 		if b, ok := s.batches[s.order[i]]; ok {
-			out = append(out, snapshot(b))
+			out = append(out, s.snapshotWithProgressLocked(b))
 		}
 	}
 	if limit > 0 && len(out) > limit {
@@ -1566,6 +1585,108 @@ func (s *Scheduler) finishWithLogs(js *JobState, st, errMsg string, errLogs []st
 		})
 	}
 	s.log.Info("批次任务完成", "tag", js.Tag, "status", st, "id", js.RemoteID)
+}
+
+// snapshotWithProgressLocked copies a batch and fills ETA estimates for its
+// running jobs. Caller must hold s.mu.
+func (s *Scheduler) snapshotWithProgressLocked(b *Batch) *Batch {
+	cp := snapshot(b)
+	type hist struct {
+		key  string
+		rate float64
+	}
+	var all []hist
+	for _, bb := range s.batches {
+		for _, js := range bb.Jobs {
+			if js.Status != StDone || js.StartedAt.IsZero() || js.EndedAt.IsZero() {
+				continue
+			}
+			years := windowYears(js.Start, js.End)
+			dur := js.EndedAt.Sub(js.StartedAt).Seconds()
+			if years <= 0 || dur <= 0 {
+				continue
+			}
+			all = append(all, hist{key: js.StrategyKey, rate: dur / years})
+		}
+	}
+	for _, js := range cp.Jobs {
+		if js.Status != StRunning || js.StartedAt.IsZero() {
+			continue
+		}
+		years := windowYears(js.Start, js.End)
+		if years <= 0 {
+			continue
+		}
+		same := make([]float64, 0, len(all))
+		global := make([]float64, 0, len(all))
+		for _, h := range all {
+			global = append(global, h.rate)
+			if js.StrategyKey != "" && h.key == js.StrategyKey {
+				same = append(same, h.rate)
+			}
+		}
+		rate, basis, samples := 0.0, "", 0
+		if len(same) >= 2 {
+			rate, basis, samples = medianFloat(same), "strategyKey", len(same)
+		} else if len(global) >= 2 {
+			rate, basis, samples = medianFloat(global), "global", len(global)
+		}
+		if rate <= 0 {
+			continue
+		}
+		elapsed := time.Since(js.StartedAt).Seconds()
+		total := rate * years
+		pct := elapsed / total * 100
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 99 {
+			pct = 99
+		}
+		eta := total - elapsed
+		if eta < 0 {
+			eta = 0
+		}
+		js.Progress = &ProgressEstimate{
+			ElapsedSeconds:   math.Round(elapsed),
+			EstimatedSeconds: math.Round(total),
+			Percent:          math.Round(pct*10) / 10,
+			EtaSeconds:       math.Round(eta),
+			Basis:            basis,
+			Samples:          samples,
+		}
+	}
+	return cp
+}
+
+// windowYears converts a backtest window into calendar years.
+func windowYears(start, end string) float64 {
+	st, err := time.Parse("2006-01-02", start)
+	if err != nil {
+		return 0
+	}
+	et := time.Now()
+	if end != "" {
+		if t, err := time.Parse("2006-01-02", end); err == nil {
+			et = t
+		}
+	}
+	if et.Before(st) {
+		return 0
+	}
+	return et.Sub(st).Hours() / 24 / 365.25
+}
+
+func medianFloat(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	sort.Float64s(v)
+	n := len(v)
+	if n%2 == 1 {
+		return v[n/2]
+	}
+	return (v[n/2-1] + v[n/2]) / 2
 }
 
 func snapshot(b *Batch) *Batch {

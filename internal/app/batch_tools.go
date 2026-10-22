@@ -144,7 +144,7 @@ func registerBatchTools(s *mcp.Server, d deps) {
 
 	s.Register(mcp.Tool{
 		Name:        "jq_batch_status",
-		Description: "查看批次进度与每个任务的状态/指标（非阻塞）。",
+		Description: "查看批次进度与每个任务的状态/指标（非阻塞）。运行中任务带 progress 估算：elapsedSeconds/estimatedSeconds/percent/etaSeconds/basis(strategyKey|global)/samples；聚宽无真实水位，估算来自已完成回测的秒/模拟年。",
 		InputSchema: mcp.Obj(map[string]any{
 			"batchId": mcp.Str("批次 ID；留空则返回最近批次列表"),
 			"limit":   mcp.Int("列表条数（batchId 为空时）"),
