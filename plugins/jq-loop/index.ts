@@ -25,6 +25,9 @@ const DEFAULTS = {
   // job: stream with no coalescing window.
   wakeOn: "stream",
   coalesceMs: 500,
+  // queue: 等当前回合结束再投递（不打断工具）；steer: 立即插入（会打断正在执行的工具）。
+  // 追求最小延迟用 steer；活动回合若已在 jq_batch_wait 上阻塞，steer 会中断该等待。
+  delivery: "queue",
   maxIterations: 0, // 0 = unlimited; reset when the user sends a new prompt
   cooldownMs: 0,
   maxJobs: 30,
@@ -153,7 +156,7 @@ async function wake(sessionID, render, reason) {
       sessionID,
       text,
       description: `jq-loop ${reason}`,
-      delivery: "queue",
+      delivery: opt().delivery === "steer" ? "steer" : "queue",
       resume: true,
     });
   }
