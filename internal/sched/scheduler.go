@@ -1292,16 +1292,25 @@ func (s *Scheduler) markQuota(alias, reason string) {
 	s.mu.Lock()
 	if a, ok := s.accounts[alias]; ok {
 		a.state = AcctQuota
-		a.cooldownUntil = time.Now().Add(24 * time.Hour)
+		a.cooldownUntil = quotaCooldown(reason, time.Now())
 		a.lastError = reason
 	}
 	s.mu.Unlock()
 	s.cond.Broadcast()
 }
 
+// quotaCooldown picks the reset time from the platform message: daily limits
+// ("今天/明天") reset at local midnight, other quota failures get a 24h guess.
+func quotaCooldown(reason string, now time.Time) time.Time {
+	if strings.Contains(reason, "明天") || strings.Contains(reason, "今天") || strings.Contains(reason, "今日") {
+		return nextMidnight(now)
+	}
+	return now.Add(24 * time.Hour)
+}
+
 // markFreeExhausted blocks free jobs on this account but still allows jobs the
-// user has approved to spend credits. The 24h window is a conservative guess at
-// when JoinQuant resets the free allowance.
+// user has approved to spend credits. JoinQuant's free allowance is daily, so
+// the cooldown ends at the next local midnight rather than 24h from the error.
 func (s *Scheduler) markFreeExhausted(alias, reason string) {
 	if alias == "" {
 		return
@@ -1309,11 +1318,16 @@ func (s *Scheduler) markFreeExhausted(alias, reason string) {
 	s.mu.Lock()
 	if a, ok := s.accounts[alias]; ok {
 		a.state = AcctFreeOut
-		a.cooldownUntil = time.Now().Add(24 * time.Hour)
+		a.cooldownUntil = nextMidnight(time.Now())
 		a.lastError = reason
 	}
 	s.mu.Unlock()
 	s.cond.Broadcast()
+}
+
+func nextMidnight(now time.Time) time.Time {
+	y, m, d := now.Date()
+	return time.Date(y, m, d+1, 0, 0, 0, 0, now.Location())
 }
 
 func (s *Scheduler) markHealthy(alias string) {

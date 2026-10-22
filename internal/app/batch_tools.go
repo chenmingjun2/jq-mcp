@@ -88,8 +88,15 @@ func registerBatchTools(s *mcp.Server, d deps) {
 				if j.Placement == "pinned" && j.Account == "" {
 					return nil, apierr.Usage("placement=pinned 时必须指定 account")
 				}
-				if j.Account != "" && d.accounts != nil {
-					if _, ok := d.accounts.Get(j.Account); !ok {
+				if j.Account != "" {
+					known := false
+					for _, av := range d.sched.Accounts() {
+						if av.Alias == j.Account {
+							known = true
+							break
+						}
+					}
+					if !known {
 						return nil, apierr.Usage("账号 %s 不存在，先执行 jq-mcp accounts add", j.Account)
 					}
 				}

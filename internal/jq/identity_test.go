@@ -28,7 +28,7 @@ func TestParseLegacyIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !id.LoggedIn || id.UID != "uid-abc" || id.Nickname != "nick" || id.VIPType != "vip" {
+	if !id.LoggedIn || id.UID != "uk" || id.UniqueKey != "uk" || id.Nickname != "nick" || id.VIPType != "vip" {
 		t.Fatalf("identity = %+v", id)
 	}
 	if !id.CreditsKnown || id.Credits != 12 {

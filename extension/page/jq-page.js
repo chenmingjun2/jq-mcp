@@ -14,7 +14,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.2.4";
+  const VERSION = "0.4.0";
   const BASE = "https://www.joinquant.com";
 
   const PATHS = {
@@ -344,7 +344,8 @@
     }
     return {
       loggedIn: true,
-      uid: info.userId ? String(info.userId) : "",
+      uid: info.uniqueKey ? String(info.uniqueKey) : info.userId ? String(info.userId) : "",
+      userId: info.userId ? String(info.userId) : "",
       uniqueKey: info.uniqueKey || "",
       nickname: info.alias || "",
       vipType: info.vipType || "",

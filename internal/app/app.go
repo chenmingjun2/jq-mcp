@@ -254,7 +254,7 @@ func runDaemon(ctx context.Context, opts Options, serveStdio bool) error {
 		})
 	})
 
-	d := deps{jq: client, tasks: tasks, hub: hub, sched: sch, pool: pool, accounts: acctReg}
+	d := deps{jq: client, tasks: tasks, hub: hub, sched: sch, pool: pool}
 	registerTools(server, d)
 	registerBatchTools(server, d)
 

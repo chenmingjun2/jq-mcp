@@ -418,13 +418,15 @@ func accountsUA(args []string) error {
 	}
 	switch strings.ToLower(mode) {
 	case "random", "reroll":
+		p.SetUAOff(false)
 		p.SetUA("", "", "")
 		ua := p.EnsureUA("random", cfg.Pool.UAPlatforms, cfg.Pool.UABrowsers)
 		fmt.Printf("%s 的 UA 已重新随机：%s/%s\n%s\n", alias, p.UAPlatform, p.UABrowser, ua)
 	case "off", "none", "disabled":
-		p.SetUA("", "", "")
+		p.SetUAOff(true)
 		fmt.Printf("%s 的 UA 伪装已关闭（重启浏览器后生效）\n", alias)
 	default:
+		p.SetUAOff(false)
 		p.SetUA(mode, "custom", "custom")
 		fmt.Printf("%s 的 UA 已设为自定义值（重启浏览器后生效）\n", alias)
 	}

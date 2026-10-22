@@ -31,6 +31,7 @@ type Profile struct {
 	UserAgent  string `json:"userAgent,omitempty"`
 	UAPlatform string `json:"uaPlatform,omitempty"`
 	UABrowser  string `json:"uaBrowser,omitempty"`
+	UAOff      bool   `json:"uaOff,omitempty"`
 }
 
 // PrepareProfile creates/refreshes the profile directory and writes the
@@ -68,6 +69,9 @@ func PrepareProfile(alias, extSrc, wsURL, token string) (*Profile, error) {
 // EnsureUA assigns a random identity once when UA spoofing is enabled. Existing
 // assignments are kept, which is what makes the fingerprint stable.
 func (p *Profile) EnsureUA(mode string, platforms, browsers []string) string {
+	if p.UAOff {
+		return ""
+	}
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "off", "none", "disabled":
 		if p.UserAgent != "" {
@@ -88,6 +92,15 @@ func (p *Profile) EnsureUA(mode string, platforms, browsers []string) string {
 // SetUA overrides the profile identity. An empty value clears it.
 func (p *Profile) SetUA(ua, platform, browser string) {
 	p.UserAgent, p.UAPlatform, p.UABrowser = strings.TrimSpace(ua), platform, browser
+	p.save()
+}
+
+// SetUAOff pins spoofing off for this profile, even when pool.ua_mode=random.
+func (p *Profile) SetUAOff(off bool) {
+	p.UAOff = off
+	if off {
+		p.UserAgent, p.UAPlatform, p.UABrowser = "", "", ""
+	}
 	p.save()
 }
 

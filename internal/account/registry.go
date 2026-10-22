@@ -320,6 +320,14 @@ func (r *Registry) BindConnection(hint, uid, nickname string) (Account, error) {
 	if hint != "" {
 		if found, ok := r.findLocked(hint); ok {
 			if found.UID != "" {
+				if nickname != "" && found.Nickname == nickname {
+					found.UID = uid
+					found.UpdatedAt = time.Now()
+					if err := r.saveLocked(); err != nil {
+						return *found, err
+					}
+					return *found, nil
+				}
 				return *found, fmt.Errorf("账号 %s 已绑定其他 uid (%s)", hint, shortUID(found.UID))
 			}
 			found.UID = uid
@@ -349,6 +357,21 @@ func (r *Registry) BindConnection(hint, uid, nickname string) (Account, error) {
 			return acc, nil
 		}
 		return Account{}, fmt.Errorf("连接自报别名 %q 未注册，且未知 uid %s 不在注册表中", hint, shortUID(uid))
+	}
+
+	// Upgrade path: 0.4.0 switched the binding key from JoinQuant's
+	// session-scoped userId to the stable uniqueKey. A single-account install
+	// can safely migrate when the nickname matches.
+	if len(r.data.Accounts) == 1 && nickname != "" {
+		a := &r.data.Accounts[0]
+		if a.UID != "" && a.Nickname == nickname {
+			a.UID = uid
+			a.UpdatedAt = time.Now()
+			if err := r.saveLocked(); err != nil {
+				return *a, err
+			}
+			return *a, nil
+		}
 	}
 
 	if !bootstrap && r.data.Unregistered != UnregisteredAccept {

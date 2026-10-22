@@ -111,6 +111,11 @@ func (c *Client) identity(ctx context.Context, clientID string) (Identity, error
 	if raw, err := call("auth.identity", map[string]any{}); err == nil {
 		var id Identity
 		if err := json.Unmarshal(raw, &id); err == nil && id.UID != "" {
+			// JoinQuant's userId is session-scoped and changes after an
+			// extension reload. uniqueKey is the stable account identity.
+			if id.UniqueKey != "" {
+				id.UID = id.UniqueKey
+			}
 			id.CheckedAt = time.Now()
 			if !id.CreditsKnown {
 				c.fillCredits(cctx, call, &id)
@@ -167,6 +172,9 @@ func parseLegacyIdentity(raw json.RawMessage, ctx context.Context, call func(str
 		Level:     probe.Raw.Data.Level,
 		LoggedIn:  probe.LoggedIn || probe.Raw.Data.IsLogin == 1,
 		CheckedAt: time.Now(),
+	}
+	if id.UniqueKey != "" {
+		id.UID = id.UniqueKey
 	}
 	if id.LoggedIn && id.UID == "" {
 		return id, apierr.NotAuthenticated()

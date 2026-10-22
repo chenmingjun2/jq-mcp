@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jqhelper/jq-mcp/internal/account"
 	"github.com/jqhelper/jq-mcp/internal/apierr"
 	"github.com/jqhelper/jq-mcp/internal/bridge"
 	"github.com/jqhelper/jq-mcp/internal/jq"
@@ -20,12 +19,11 @@ import (
 )
 
 type deps struct {
-	jq       *jq.Client
-	tasks    *task.Manager
-	hub      *bridge.Hub
-	sched    *sched.Scheduler
-	pool     *poolRuntime
-	accounts *account.Registry
+	jq    *jq.Client
+	tasks *task.Manager
+	hub   *bridge.Hub
+	sched *sched.Scheduler
+	pool  *poolRuntime
 }
 
 func decodeArgs(args json.RawMessage, v any) error {

@@ -50,6 +50,20 @@ func TestBindConnectionBootstrapWithoutHintUsesDefault(t *testing.T) {
 	}
 }
 
+func TestBindConnectionMigratesLegacySingleAccountKey(t *testing.T) {
+	r, _ := Load(filepath.Join(t.TempDir(), "accounts.json"))
+	if _, err := r.BindConnection("", "old-user-id", "nick"); err != nil {
+		t.Fatal(err)
+	}
+	acc, err := r.BindConnection("", "unique-key", "nick")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.UID != "unique-key" || acc.Alias != "default" {
+		t.Fatalf("migration failed: %+v", acc)
+	}
+}
+
 func TestBindConnectionRejectsAliasConflict(t *testing.T) {
 	r, _ := Load(filepath.Join(t.TempDir(), "accounts.json"))
 	if _, err := r.BindConnection("a1", "uid-1", ""); err != nil {
