@@ -347,3 +347,30 @@ func TestDispatcherKeepsLegacyStrategyIDOnDefaultAccount(t *testing.T) {
 		t.Fatalf("runs = %v", stats.runs)
 	}
 }
+
+func TestSetCapOnlyTightensPerAccountCap(t *testing.T) {
+	s := newPoolTestScheduler(newPoolStats(), nil)
+	s.SyncAccounts([]AccountRuntime{
+		{Alias: "a1", Enabled: true, Connected: true, LoggedIn: true, Cap: 2},
+		{Alias: "a2", Enabled: true, Connected: true, LoggedIn: true, Cap: 2},
+	})
+	// A batch's maxConcurrent must not raise the configured per-account cap.
+	s.SetCap(6)
+	for _, a := range s.Accounts() {
+		if a.Cap != 2 {
+			t.Fatalf("account %s cap=%d, want 2 (SetCap must not raise)", a.Alias, a.Cap)
+		}
+	}
+	// It may tighten.
+	s.SetCap(1)
+	for _, a := range s.Accounts() {
+		if a.Cap != 1 {
+			t.Fatalf("account %s cap=%d, want 1 after tightening", a.Alias, a.Cap)
+		}
+	}
+	// A per-account ceiling behaves the same way.
+	s.SetCapFor("a1", 4)
+	if got := s.CapFor("a1"); got != 1 {
+		t.Fatalf("a1 cap=%d, want 1 (SetCapFor must not raise)", got)
+	}
+}

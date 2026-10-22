@@ -389,23 +389,30 @@ func (s *Scheduler) CapFor(alias string) int {
 	return 0
 }
 
-// SetCap sets the default cap. Accounts with an explicit override keep theirs.
+// SetCap sets a ceiling for the pool. It only tightens: an account's
+// configured cap (accounts cap / defaultCap) is never raised by a batch's
+// maxConcurrent. Use `jq-mcp accounts cap <alias> N` to change it.
 func (s *Scheduler) SetCap(n int) { s.SetCapFor("", n) }
 
-// SetCapFor sets a cap for one account ("" = default for all accounts without
-// an explicit per-account cap).
+// SetCapFor applies a ceiling to one account ("" = every account).
 func (s *Scheduler) SetCapFor(alias string, n int) {
 	if n <= 0 {
 		return
 	}
 	s.mu.Lock()
+	clamp := func(cur int) int {
+		if cur <= 0 || n < cur {
+			return n
+		}
+		return cur
+	}
 	if alias == "" {
 		s.maxConcurrent = n
 		for _, a := range s.accounts {
-			a.cap = n
+			a.cap = clamp(a.cap)
 		}
 	} else if a, ok := s.accounts[alias]; ok {
-		a.cap = n
+		a.cap = clamp(a.cap)
 	}
 	s.mu.Unlock()
 	s.cond.Broadcast()
