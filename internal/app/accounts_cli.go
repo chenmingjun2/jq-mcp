@@ -75,6 +75,7 @@ type accountsFlags struct {
 	chromePath   string
 	extensionDir string
 	headless     bool
+	headed       bool
 	cap          int
 	all          bool
 	purge        bool
@@ -86,6 +87,7 @@ func newAccountsFlags(name string, args []string) *accountsFlags {
 	f.fs.StringVar(&f.chromePath, "chrome-path", "", "Chrome/Chromium 可执行文件路径")
 	f.fs.StringVar(&f.extensionDir, "extension-dir", "", "jqhelper 插件目录")
 	f.fs.BoolVar(&f.headless, "headless", false, "无头模式（首次登录请勿使用）")
+	f.fs.BoolVar(&f.headed, "headed", false, "强制有头（覆盖 pool.headless），用于解验证码")
 	f.fs.IntVar(&f.cap, "cap", -1, "该账号并发上限（0=默认）")
 	f.fs.BoolVar(&f.all, "all", false, "对所有账号执行")
 	f.fs.BoolVar(&f.purge, "purge-profile", false, "同时删除 profile 目录（含登录态）")
@@ -209,7 +211,13 @@ func accountsOpen(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	headless := f.headless || cfg.Pool.Headless
+	headless := cfg.Pool.Headless
+	if f.headless {
+		headless = true
+	}
+	if f.headed {
+		headless = false
+	}
 	wsURL := poolWSURL(cfg)
 	for _, alias := range aliases {
 		if _, ok := reg.Get(alias); !ok {
