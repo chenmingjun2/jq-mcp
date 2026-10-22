@@ -17,6 +17,16 @@ import (
 type Client struct {
 	hub     *bridge.Hub
 	timeout time.Duration
+
+	// account pins every call to one pool account (alias or uid). Empty means
+	// "resolve per call".
+	account string
+	// resolve maps a method + params to an account. It is used for reads that
+	// only carry a backtest id (the scheduler records which account owns it).
+	resolve func(method string, params json.RawMessage) string
+	// defaultAccount supplies the fallback account when neither the client nor
+	// resolve names one.
+	defaultAccount func() string
 }
 
 // New builds a client. timeout applies to each bridge round-trip.
@@ -27,10 +37,153 @@ func New(hub *bridge.Hub, timeout time.Duration) *Client {
 	return &Client{hub: hub, timeout: timeout}
 }
 
+// WithAccount returns a shallow copy pinned to one account. The copy shares the
+// hub, timeout and resolver callbacks.
+func (c *Client) WithAccount(account string) *Client {
+	cp := *c
+	cp.account = account
+	return &cp
+}
+
+// Account returns the pinned account (empty when calls are resolved per call).
+func (c *Client) Account() string { return c.account }
+
+// SetAccountResolver installs the per-call account resolver.
+func (c *Client) SetAccountResolver(fn func(method string, params json.RawMessage) string) {
+	c.resolve = fn
+}
+
+// SetDefaultAccount installs the fallback account supplier.
+func (c *Client) SetDefaultAccount(fn func() string) { c.defaultAccount = fn }
+
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	account := c.account
+	if account == "" && c.resolve != nil {
+		raw, _ := json.Marshal(params)
+		account = c.resolve(method, raw)
+	}
+	if account == "" && c.defaultAccount != nil {
+		account = c.defaultAccount()
+	}
 	cctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	return c.hub.Call(cctx, method, params)
+	return c.hub.CallAccount(cctx, account, method, params)
+}
+
+// ---------------------------------------------------------------------------
+// identity
+// ---------------------------------------------------------------------------
+
+// Identity is the normalized account identity used by the pool.
+type Identity struct {
+	UID          string    `json:"uid"`
+	UniqueKey    string    `json:"uniqueKey,omitempty"`
+	Nickname     string    `json:"nickname,omitempty"`
+	VIPType      string    `json:"vipType,omitempty"`
+	Level        int       `json:"level,omitempty"`
+	Credits      int       `json:"credits"`
+	CreditsKnown bool      `json:"creditsKnown"`
+	LoggedIn     bool      `json:"loggedIn"`
+	CheckedAt    time.Time `json:"checkedAt,omitempty"`
+}
+
+// Identity probes the default account.
+func (c *Client) Identity(ctx context.Context) (Identity, error) {
+	return c.identity(ctx, "")
+}
+
+// IdentityOn probes one bridge connection before an account is bound.
+func (c *Client) IdentityOn(ctx context.Context, clientID string) (Identity, error) {
+	return c.identity(ctx, clientID)
+}
+
+func (c *Client) identity(ctx context.Context, clientID string) (Identity, error) {
+	cctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	call := func(method string, params any) (json.RawMessage, error) {
+		if clientID != "" {
+			return c.hub.CallClient(cctx, clientID, method, params)
+		}
+		return c.hub.CallAccount(cctx, c.account, method, params)
+	}
+
+	if raw, err := call("auth.identity", map[string]any{}); err == nil {
+		var id Identity
+		if err := json.Unmarshal(raw, &id); err == nil && id.UID != "" {
+			id.CheckedAt = time.Now()
+			if !id.CreditsKnown {
+				c.fillCredits(cctx, call, &id)
+			}
+			return id, nil
+		}
+	}
+
+	// Older extensions do not implement auth.identity. The login state already
+	// carries the stable userId, so fall back to it.
+	raw, err := call("auth.status", map[string]any{})
+	if err != nil {
+		return Identity{}, err
+	}
+	return parseLegacyIdentity(raw, cctx, call)
+}
+
+func (c *Client) fillCredits(ctx context.Context, call func(string, any) (json.RawMessage, error), id *Identity) {
+	raw, err := call("auth.credits", map[string]any{})
+	if err != nil {
+		return
+	}
+	var p struct {
+		Amount int  `json:"amount"`
+		Known  bool `json:"known"`
+	}
+	if json.Unmarshal(raw, &p) == nil && p.Known {
+		id.Credits, id.CreditsKnown = p.Amount, true
+	}
+}
+
+func parseLegacyIdentity(raw json.RawMessage, ctx context.Context, call func(string, any) (json.RawMessage, error)) (Identity, error) {
+	var probe struct {
+		LoggedIn bool `json:"loggedIn"`
+		Raw      struct {
+			Data struct {
+				IsLogin   int    `json:"isLogin"`
+				UserID    string `json:"userId"`
+				UniqueKey string `json:"uniqueKey"`
+				Alias     string `json:"alias"`
+				VIPType   string `json:"vipType"`
+				Level     int    `json:"level"`
+			} `json:"data"`
+		} `json:"raw"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return Identity{}, apierr.Wrap(apierr.CodeInternal, err)
+	}
+	id := Identity{
+		UID:       probe.Raw.Data.UserID,
+		UniqueKey: probe.Raw.Data.UniqueKey,
+		Nickname:  probe.Raw.Data.Alias,
+		VIPType:   probe.Raw.Data.VIPType,
+		Level:     probe.Raw.Data.Level,
+		LoggedIn:  probe.LoggedIn || probe.Raw.Data.IsLogin == 1,
+		CheckedAt: time.Now(),
+	}
+	if id.LoggedIn && id.UID == "" {
+		return id, apierr.NotAuthenticated()
+	}
+	if id.LoggedIn {
+		// Fall back to the credits endpoint; failure only marks it unknown.
+		if raw, err := call("auth.credits", map[string]any{}); err == nil {
+			var p struct {
+				Amount int  `json:"amount"`
+				Known  bool `json:"known"`
+			}
+			if json.Unmarshal(raw, &p) == nil && p.Known {
+				id.Credits, id.CreditsKnown = p.Amount, true
+			}
+		}
+	}
+	return id, nil
 }
 
 // BridgeStatus returns the raw bridge connectivity snapshot.

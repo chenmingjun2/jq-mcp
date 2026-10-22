@@ -3,9 +3,11 @@
 import { VERSION, toErrorPayload } from "./protocol.js";
 
 export class BridgeClient {
-  constructor({ url, token, onRequest, onStatus, onEvent }) {
+  constructor({ url, token, alias, daemonProfile, onRequest, onStatus, onEvent }) {
     this.url = url;
     this.token = token;
+    this.alias = alias || "";
+    this.daemonProfile = daemonProfile || "";
     this.onRequest = onRequest;
     this.onStatus = onStatus || (() => {});
     this.onEvent = onEvent || (() => {});
@@ -78,6 +80,8 @@ export class BridgeClient {
         client: "jqhelper",
         version: VERSION,
         token: this.token,
+        alias: this.alias,
+        daemonProfile: this.daemonProfile,
         browser: navigator.userAgent.includes("Edg/") ? "edge" : "chrome",
       },
     });

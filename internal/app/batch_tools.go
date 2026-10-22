@@ -22,20 +22,28 @@ func registerBatchTools(s *mcp.Server, d deps) {
 
 	s.Register(mcp.Tool{
 		Name:        "jq_batch_submit",
-		Description: "把回测任务提交到服务端调度器（不阻塞）。调度器用固定工作线程消费共享队列（工作窃取），把并发顶满，并在被平台拒绝时自动收紧/背压重试。返回 batchId，用 jq_batch_wait/jq_batch_events 取结果。可选 callbackUrl：批次/任务终结时服务端会 POST 事件，并附 HMAC 签名。",
+		Description: "把回测任务提交到服务端调度器（不阻塞）。带 code/codePath 的任务可自动落到任意账号（云端会创建 [jq-mcp] 前缀副本）；带 strategyId 的任务钉在指定或默认账号。返回 batchId，用 jq_batch_wait/jq_batch_events 取结果。可选 callbackUrl：批次/任务终结时服务端会 POST 事件。",
 		InputSchema: mcp.Obj(map[string]any{
 			"jobs": mcp.Arr("任务列表", mcp.Obj(map[string]any{
-				"tag":        mcp.Str("自定义标识（回显在结果里）"),
-				"strategyId": mcp.Str("策略 ID"),
-				"start":      mcp.Str("开始日期 YYYY-MM-DD"),
-				"end":        mcp.Str("结束日期 YYYY-MM-DD"),
-				"capital":    mcp.Num("初始资金"),
-				"frequency":  mcp.StrEnum("频率", "day", "minute"),
-				"compile":    mcp.Bool("是否编译运行"),
-				"useCredit":  mcp.Bool("是否可用积分续跑"),
-				"priority":   mcp.Int("优先级（小=先跑）"),
+				"tag":         mcp.Str("自定义标识（回显在结果里）"),
+				"strategyId":  mcp.Str("策略 ID（账号私有；提供后视为钉住账号）"),
+				"strategyKey": mcp.Str("本地策略键，用于复用云端副本（默认取 name 或代码 hash）"),
+				"name":        mcp.Str("云端策略名，默认与 strategyKey 相同"),
+				"code":        mcp.Str("策略源码；与 codePath 二选一"),
+				"codePath":    mcp.Str("本地策略文件路径"),
+				"account":     mcp.Str("指定账号别名（钉住，不迁移）"),
+				"placement":   mcp.StrEnum("放置方式", "auto", "pinned", "sticky"),
+				"start":       mcp.Str("开始日期 YYYY-MM-DD"),
+				"end":         mcp.Str("结束日期 YYYY-MM-DD"),
+				"capital":     mcp.Num("初始资金"),
+				"frequency":   mcp.StrEnum("频率", "day", "minute"),
+				"compile":     mcp.Bool("是否编译运行"),
+				"useCredit":   mcp.Bool("是否可用积分续跑"),
+				"priority":    mcp.Int("优先级（小=先跑）"),
 			})),
-			"maxConcurrent":  mcp.Int("覆盖并发上限（0=沿用当前）"),
+			"account":        mcp.Str("可选：给所有未指定账号的 job 统一钉住该账号"),
+			"placement":      mcp.StrEnum("默认放置方式", "auto", "pinned", "sticky"),
+			"maxConcurrent":  mcp.Int("覆盖并发上限（指定 account 时只改该账号，否则改默认值）"),
 			"workers":        mcp.Int("工作线程数（0=默认）"),
 			"callbackUrl":    mcp.Str("可选：事件回调地址（http/https），异步 POST，失败自动重试"),
 			"callbackSecret": mcp.Str("可选：HMAC-SHA256 密钥；设置后请求带 X-JQ-Signature"),
@@ -44,6 +52,8 @@ func registerBatchTools(s *mcp.Server, d deps) {
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
 				Jobs           []sched.Job `json:"jobs"`
+				Account        string      `json:"account"`
+				Placement      string      `json:"placement"`
 				MaxConcurrent  int         `json:"maxConcurrent"`
 				Workers        int         `json:"workers"`
 				CallbackURL    string      `json:"callbackUrl"`
@@ -57,15 +67,42 @@ func registerBatchTools(s *mcp.Server, d deps) {
 				return nil, apierr.Usage("jobs 不能为空")
 			}
 			for i := range a.Jobs {
-				if a.Jobs[i].StrategyID == "" || a.Jobs[i].Start == "" {
-					return nil, apierr.Usage("每个 job 需含 strategyId 与 start")
+				j := &a.Jobs[i]
+				if j.Start == "" {
+					return nil, apierr.Usage("每个 job 需要 start")
+				}
+				if j.StrategyID == "" && j.Code == "" && j.CodePath == "" {
+					return nil, apierr.Usage("每个 job 需要 strategyId，或 code/codePath 之一")
+				}
+				if j.Account == "" {
+					j.Account = a.Account
+				}
+				if j.Placement == "" {
+					j.Placement = a.Placement
+				}
+				switch j.Placement {
+				case "", "auto", "pinned", "sticky":
+				default:
+					return nil, apierr.Usage("placement 必须是 auto、pinned 或 sticky")
+				}
+				if j.Placement == "pinned" && j.Account == "" {
+					return nil, apierr.Usage("placement=pinned 时必须指定 account")
+				}
+				if j.Account != "" && d.accounts != nil {
+					if _, ok := d.accounts.Get(j.Account); !ok {
+						return nil, apierr.Usage("账号 %s 不存在，先执行 jq-mcp accounts add", j.Account)
+					}
 				}
 			}
 			if err := validateCallback(a.CallbackURL, a.CallbackOn); err != nil {
 				return nil, err
 			}
 			if a.MaxConcurrent > 0 {
-				d.sched.SetCap(a.MaxConcurrent)
+				if a.Account != "" {
+					d.sched.SetCapFor(a.Account, a.MaxConcurrent)
+				} else {
+					d.sched.SetCap(a.MaxConcurrent)
+				}
 			}
 			b := d.sched.SubmitWithOptions(a.Jobs, sched.SubmitOptions{
 				CallbackURL:    a.CallbackURL,
@@ -79,12 +116,13 @@ func registerBatchTools(s *mcp.Server, d deps) {
 				return nil, err
 			}
 			out := map[string]any{
-				"batchId":   snap.ID,
-				"count":     len(snap.Jobs),
-				"status":    "submitted",
-				"cap":       d.sched.Cap(),
-				"jobs":      snap.Jobs,
-				"createdAt": snap.CreatedAt,
+				"batchId":     snap.ID,
+				"count":       len(snap.Jobs),
+				"status":      "submitted",
+				"cap":         d.sched.Cap(),
+				"accountCaps": accountCaps(d.sched),
+				"jobs":        snap.Jobs,
+				"createdAt":   snap.CreatedAt,
 			}
 			if snap.Callback != nil {
 				out["callback"] = map[string]any{
@@ -113,7 +151,7 @@ func registerBatchTools(s *mcp.Server, d deps) {
 				return nil, err
 			}
 			if a.BatchID == "" {
-				return map[string]any{"batches": d.sched.List(a.Limit), "cap": d.sched.Cap()}, nil
+				return map[string]any{"batches": d.sched.List(a.Limit), "cap": d.sched.Cap(), "accountCaps": accountCaps(d.sched)}, nil
 			}
 			b, err := d.sched.Status(a.BatchID)
 			if err != nil {
@@ -199,6 +237,7 @@ func registerBatchTools(s *mcp.Server, d deps) {
 				if err != nil {
 					return nil, err
 				}
+				res.NeedsConfirmation = pendingCreditJobs(res.Batch)
 				progress(float64(len(res.Events)), float64(a.Limit), "事件轮询返回")
 				return withEvents(res, true), nil
 			}
@@ -212,8 +251,46 @@ func registerBatchTools(s *mcp.Server, d deps) {
 			}
 			return withEvents(&sched.WaitResult{
 				Batch: b, Events: evs, NextEventID: next,
-				Done: allTerminalBatch(b), HasMore: more,
+				NeedsConfirmation: pendingCreditJobs(b),
+				Done:              allTerminalBatch(b), HasMore: more,
 			}, true), nil
+		},
+	})
+	s.Register(mcp.Tool{
+		Name:        "jq_batch_confirm_credit",
+		Description: "免费回测额度用完时，批次会暂停并返回 needsConfirmation。确认后传 approve=true、confirm=true 消耗积分重试；传 approve=false 则把待确认任务置为失败。",
+		InputSchema: mcp.Obj(map[string]any{
+			"batchId": mcp.Str("批次 ID"),
+			"approve": mcp.Bool("true=允许使用积分重试；false=拒绝（任务失败）"),
+			"tags":    mcp.Arr("可选：只处理这些 tag", mcp.Str("job tag")),
+			"confirm": mcp.Bool("必须为 true"),
+		}, "batchId", "confirm"),
+		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var a struct {
+				BatchID string     `json:"batchId"`
+				Approve bool       `json:"approve"`
+				Tags    stringList `json:"tags"`
+				Confirm bool       `json:"confirm"`
+			}
+			if err := decodeArgs(args, &a); err != nil {
+				return nil, err
+			}
+			if a.BatchID == "" {
+				return nil, apierr.Usage("batchId 不能为空")
+			}
+			if err := requireConfirm(a.Confirm, "jq_batch_confirm_credit"); err != nil {
+				return nil, err
+			}
+			snap, err := d.sched.ConfirmCredit(a.BatchID, a.Approve, a.Tags)
+			if err != nil {
+				return nil, err
+			}
+			out := withCounts(snap)
+			out["approved"] = a.Approve
+			if a.Approve {
+				out["hint"] = "积分重试已入队，继续调用 jq_batch_wait"
+			}
+			return out, nil
 		},
 	})
 }
@@ -234,17 +311,34 @@ func validateCallback(raw, on string) error {
 	return nil
 }
 
+func accountCaps(s *sched.Scheduler) map[string]int {
+	out := map[string]int{}
+	for _, a := range s.Accounts() {
+		out[a.Alias] = a.Cap
+	}
+	return out
+}
+
 func withCounts(b *sched.Batch) map[string]any {
 	counts := map[string]int{}
+	byAccount := map[string]int{}
 	for _, js := range b.Jobs {
 		counts[js.Status]++
+		acct := js.Account
+		if acct == "" {
+			acct = js.CreditAccount
+		}
+		if acct != "" {
+			byAccount[acct]++
+		}
 	}
 	out := map[string]any{
-		"batchId": b.ID,
-		"total":   len(b.Jobs),
-		"counts":  counts,
-		"done":    allTerminalBatch(b),
-		"jobs":    b.Jobs,
+		"batchId":         b.ID,
+		"total":           len(b.Jobs),
+		"counts":          counts,
+		"countsByAccount": byAccount,
+		"done":            allTerminalBatch(b),
+		"jobs":            b.Jobs,
 	}
 	if b.Callback != nil {
 		out["callback"] = map[string]any{
@@ -252,6 +346,10 @@ func withCounts(b *sched.Batch) map[string]any {
 			"on":     b.Callback.On,
 			"signed": b.Callback.Secret != "",
 		}
+	}
+	if pending := pendingCreditJobs(b); len(pending) > 0 {
+		out["needsConfirmation"] = pending
+		out["creditRequired"] = true
 	}
 	return out
 }
@@ -264,6 +362,10 @@ func withEvents(r *sched.WaitResult, includeEvents bool) map[string]any {
 	out["newEventCount"] = len(r.Events)
 	out["nextEventId"] = r.NextEventID
 	out["done"] = r.Done
+	if len(r.NeedsConfirmation) > 0 {
+		out["needsConfirmation"] = r.NeedsConfirmation
+		out["creditRequired"] = true
+	}
 	if r.HasMore {
 		out["hasMore"] = true
 	}
@@ -279,4 +381,14 @@ func allTerminalBatch(b *sched.Batch) bool {
 		}
 	}
 	return true
+}
+
+func pendingCreditJobs(b *sched.Batch) []*sched.JobState {
+	var out []*sched.JobState
+	for _, js := range b.Jobs {
+		if js.Status == sched.StNeedsCredit {
+			out = append(out, js)
+		}
+	}
+	return out
 }

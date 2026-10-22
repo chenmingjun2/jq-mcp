@@ -30,6 +30,8 @@ func newFakeScheduler() *fakeScheduler {
 }
 
 func (f *fakeScheduler) Cap() int { return f.cap }
+
+func (f *fakeScheduler) Accounts() []sched.AccountView { return nil }
 func (f *fakeScheduler) SetCap(n int) {
 	f.mu.Lock()
 	f.cap = n

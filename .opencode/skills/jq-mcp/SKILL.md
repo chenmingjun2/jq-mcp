@@ -30,14 +30,19 @@ agent ──jq_batch_submit──► shared queue ──► jq-mcp workers ─�
 ## 1. Preflight
 
 ```
-jq_health                         # {connected, loggedIn}; stop if false
-jq_account_limits                 # concurrency cap N (or learn it from rejection)
+jq_health                         # {connected, loggedIn, cap, accounts}; stop if false
+jq_accounts                       # pool: ready/pending_login, cap, in-flight, credits
+jq_account_limits                 # credits/VIP; concurrency cap is manual + learned
 ```
 
 - `connected:false` → tell the user to open the browser/enable jqhelper/fix the
   token. Do not retry in a loop.
 - `loggedIn:false` → `jq_auth_open_login`, ask the user to log in, then
   `jq_auth_refresh`.
+- Any account in `pending_login` → ask the user to finish login in that window;
+  the daemon binds the uid automatically. Do not submit jobs that are pinned to it.
+- Multi-account: prefer portable jobs (`code`/`codePath` + `strategyKey`) and let
+  the scheduler place them; `account` pins a job and disables failover.
 - For next-turn iteration: jq-loop must be enabled (`/jq-loop on`) and jq-mcp must
   be running with `--http-addr` (default `127.0.0.1:8792`).
 - Confirm before any mutation (`save/clone/delete/move/import`, `cancel/delete`,
@@ -151,6 +156,10 @@ await jq.close();
 - `end` ≤ previous trading day. IDs rotate; resolve strategy ids by name.
 - Keep tokens/cookies/source out of reports and logs.
 - `useCredit: true` only when the user/team allows it; record it in `trials.csv`.
+- Free quota is tried first. If `jq_batch_wait` returns `creditRequired:true` /
+  `needsConfirmation`, stop and ask the user; only then call
+  `jq_batch_confirm_credit {approve:true, confirm:true}`. Never auto-approve
+  credits.
 
 See `references/workflows.md` for command-level recipes and
 `references/tools.md` for tool parameters.

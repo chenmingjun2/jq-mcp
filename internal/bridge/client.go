@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ type envelope struct {
 type client struct {
 	hub  *Hub
 	conn *websocket.Conn
+	id   string
 	send chan []byte
 	seq  uint64
 
@@ -46,14 +48,23 @@ type client struct {
 	mu      sync.Mutex
 	pending map[string]chan envelope
 	authed  bool
+
+	// Identity is written under hub.mu after auth.identity succeeds.
+	hello    Hello
+	alias    string
+	uid      string
+	nickname string
+	stale    bool
 }
 
 func newClient(h *Hub, conn *websocket.Conn) *client {
+	seq := h.seq.Add(1)
 	return &client{
 		hub:     h,
 		conn:    conn,
+		id:      fmt.Sprintf("c-%d", seq),
 		send:    make(chan []byte, sendBuffer),
-		seq:     h.seq.Add(1),
+		seq:     seq,
 		closeCh: make(chan struct{}),
 		pending: make(map[string]chan envelope),
 	}
@@ -163,7 +174,7 @@ func (c *client) handleHello(raw json.RawMessage) {
 	c.mu.Lock()
 	c.authed = true
 	c.mu.Unlock()
-	c.hub.setHello(raw)
+	c.hub.setHello(c, raw)
 }
 
 func (c *client) writePump() {

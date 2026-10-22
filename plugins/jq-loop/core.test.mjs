@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildDigest, jobResult, normalizeMetrics, shouldWake } from "./core.mjs";
+import { buildDigest, isCreditEvent, jobResult, normalizeMetrics, shouldWake } from "./core.mjs";
 
 test("normalizeMetrics unwraps the raw stats payload", () => {
   assert.deepEqual(normalizeMetrics({ metrics: { sharpe: 1.2 } }), { sharpe: 1.2 });
@@ -25,6 +25,52 @@ test("jobResult normalizes compile and backtest jobs", () => {
   assert.equal(cl.mode, "compile");
   assert.equal(cl.metrics, null);
   assert.deepEqual(cl.errorLogs, ["SyntaxError"]);
+});
+
+test("jobResult keeps the account and credit metadata", () => {
+  const js = jobResult({
+    tag: "v1",
+    status: "done",
+    account: "a2",
+    metrics: { metrics: { sharpe: 1.2 } },
+    id: "bt-1",
+  });
+  assert.equal(js.account, "a2");
+  assert.equal(js.metrics.sharpe, 1.2);
+
+  const paused = jobResult({
+    tag: "v2",
+    status: "needs_confirmation",
+    creditRequired: true,
+    creditReason: "免费额度已用完",
+    creditAccount: "a1",
+  });
+  assert.equal(paused.creditRequired, true);
+  assert.equal(paused.account, "a1");
+  assert.equal(paused.error, "免费额度已用完");
+  assert.equal(isCreditEvent({ type: "job.needs_credit" }), true);
+  assert.equal(isCreditEvent({ type: "job.done" }), false);
+});
+
+test("buildDigest renders a credit-approval request", () => {
+  const text = buildDigest({
+    batchId: "batch-credit",
+    iteration: 1,
+    phase: "credit",
+    jobs: [
+      {
+        tag: "v1",
+        status: "needs_confirmation",
+        creditRequired: true,
+        creditAccount: "a1",
+        creditReason: "免费回测额度已用完，继续将消耗 50000 积分",
+      },
+    ],
+  });
+  assert.match(text, /需要确认积分/);
+  assert.match(text, /acct=a1/);
+  assert.match(text, /jq_batch_confirm_credit/);
+  assert.match(text, /免费回测额度已用完/);
 });
 
 test("buildDigest prioritizes failures and truncates", () => {

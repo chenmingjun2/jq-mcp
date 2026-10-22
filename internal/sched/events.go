@@ -12,11 +12,12 @@ import (
 // Lifecycle event types. Every event is appended to a per-batch log and fanned
 // out to the MCP notification sink and (optionally) an HTTP webhook.
 const (
-	EvJobStarted = "job.started"
-	EvJobDone    = "job.done"
-	EvJobFailed  = "job.failed"
-	EvJobTimeout = "job.timeout"
-	EvBatchDone  = "batch.done"
+	EvJobStarted     = "job.started"
+	EvJobDone        = "job.done"
+	EvJobFailed      = "job.failed"
+	EvJobTimeout     = "job.timeout"
+	EvBatchDone      = "batch.done"
+	EvJobNeedsCredit = "job.needs_credit"
 )
 
 // Event is one entry in a batch's lifecycle log. Job is set for job.* events;
@@ -74,8 +75,9 @@ func (s *Scheduler) WaitEvents(ctx context.Context, batchID string, since int64,
 			return nil, err
 		}
 		done := allTerminal(b)
-		if done || (since > 0 && len(evs) > 0) || !time.Now().Before(deadline) {
-			return &WaitResult{Batch: b, Events: evs, NextEventID: next, Done: done, HasMore: more}, nil
+		pending := needsCreditJobs(b)
+		if done || len(pending) > 0 || (since > 0 && len(evs) > 0) || !time.Now().Before(deadline) {
+			return &WaitResult{Batch: b, Events: evs, NeedsConfirmation: pending, NextEventID: next, Done: done, HasMore: more}, nil
 		}
 		if progress != nil {
 			d, total := progressCounts(b)
@@ -85,7 +87,7 @@ func (s *Scheduler) WaitEvents(ctx context.Context, batchID string, since int64,
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return &WaitResult{Batch: b, Events: evs, NextEventID: next, Done: done, HasMore: more}, ctx.Err()
+			return &WaitResult{Batch: b, Events: evs, NeedsConfirmation: needsCreditJobs(b), NextEventID: next, Done: done, HasMore: more}, ctx.Err()
 		case <-ch:
 			timer.Stop()
 		case <-heartbeat.C:
@@ -105,19 +107,20 @@ func (s *Scheduler) NextEvents(ctx context.Context, batchID string, since int64,
 		if err != nil {
 			return nil, err
 		}
-		if len(evs) > 0 || !time.Now().Before(deadline) {
+		pending := needsCreditJobs(b)
+		if len(evs) > 0 || len(pending) > 0 || !time.Now().Before(deadline) {
 			if limit > 0 && len(evs) > limit {
 				evs = evs[:limit]
 				next = evs[len(evs)-1].ID
 				more = true
 			}
-			return &WaitResult{Batch: b, Events: evs, NextEventID: next, Done: allTerminal(b), HasMore: more}, nil
+			return &WaitResult{Batch: b, Events: evs, NeedsConfirmation: pending, NextEventID: next, Done: allTerminal(b), HasMore: more}, nil
 		}
 		timer := time.NewTimer(time.Until(deadline))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return &WaitResult{Batch: b, Events: evs, NextEventID: next, Done: allTerminal(b), HasMore: more}, ctx.Err()
+			return &WaitResult{Batch: b, Events: evs, NeedsConfirmation: needsCreditJobs(b), NextEventID: next, Done: allTerminal(b), HasMore: more}, ctx.Err()
 		case <-ch:
 			timer.Stop()
 		case <-timer.C:

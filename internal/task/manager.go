@@ -33,6 +33,8 @@ type Task struct {
 	Frequency  string    `json:"frequency,omitempty"`
 	RemoteID   string    `json:"remoteId,omitempty"`
 	ListID     string    `json:"listId,omitempty"`
+	Account    string    `json:"account,omitempty"`
+	AccountUID string    `json:"accountUid,omitempty"`
 	Status     string    `json:"status"`
 	Error      string    `json:"error,omitempty"`
 	ErrorLogs  []string  `json:"errorLogs,omitempty"`

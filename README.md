@@ -178,26 +178,66 @@ bin/jq-mcp serve --browser-mode launch --headless         # 之后可用无头
 > ⚠️ **绝不要使用 `--disable-extensions-except`。** 它会禁用该 profile 中除 jqhelper 外的所有扩展，
 > 重启后可能把用户手动安装的插件“挤掉”。`launch` 只用 `--load-extension` 加载，不影响其它扩展。
 
+### 账号池（多账号并发）
+
+一个 daemon 可以同时接多个浏览器 profile，每个 profile 登录一个聚宽账号。
+浏览器统一用 Chrome for Testing（官方 Chrome 137+ 已移除 `--load-extension`），
+首次执行 `accounts open` 会自动下载并固定版本。
+
+```bash
+bin/jq-mcp accounts add a1 a2          # 建 profile（--cap 可指定单账号并发）
+bin/jq-mcp accounts open --all         # 弹窗口；首次打开登录页，人工登录
+bin/jq-mcp accounts status             # 查看 profile / pid
+bin/jq-mcp accounts cap a1 3           # 修改单账号并发上限（0=默认）
+bin/jq-mcp accounts ua a1 random       # 重随机 UA；off 关闭；也可传自定义 UA
+bin/jq-mcp accounts close --all
+```
+
+登录后扩展会自动上报 `auth.identity`，daemon 以聚宽 `userId` 绑定账号；
+`jq_accounts` 可查看每个账号的状态、cap、在跑数、积分与冷却。
+
+**调度语义**：
+
+- `strategyId` 是账号私有的。只传 `strategyId` 的任务钉在默认账号（旧行为）。
+- 传 `strategyKey` + `code` / `codePath` 的任务是可迁移的：调度器自动选择账号，
+  在该账号创建/更新 `[jq-mcp] <name>-<hash>` 副本（按代码 hash 复用），失败了可换号重跑。
+- 显式 `account` 表示钉住该账号；`placement` 支持 `auto` / `pinned` / `sticky`。
+- 每账号独立 cap，平台返回“最多 N 个”只收紧该账号；额度耗尽会标记 24 小时并迁移任务。
+- **UA 伪装**：每个 profile 第一次启动时从 Windows/Linux/Android/macOS/iOS ×
+  Chrome/Chromium/Firefox/Safari 中随机选一个 UA，持久化后每次启动复用；
+  `accounts ua <alias> random|off|<UA>` 可重随机或关闭。范围可在
+  `pool.ua_mode / pool.ua_platforms / pool.ua_browsers` 配置。
+- **免费额度优先**：调度器始终先用 `useCredit=false` 提交。免费额度用完时，
+  任务进入 `needs_confirmation` 并暂停；确认后调用
+  `jq_batch_confirm_credit {approve:true, confirm:true}` 才会消耗积分重试。
+  提前设置 `useCredit:true` 视为已授权，会先试免费、失败后自动用积分。
+- 提交后账号掉线**不会**自动重跑（远端可能还在跑），只重试读取并带 `remoteId` 失败。
+
+`accounts.json` 只保存别名/uid/上限，不保存 Cookie；Cookie 始终留在浏览器 profile 里。
+
+完整设计、状态机与验证记录见 [docs/account-pool.md](docs/account-pool.md)。
+
 ---
 
 ## 工具一览
 
-共 **40** 个工具。✅ 只读，✍️ 写操作（带 `confirm` 门禁）。
+共 **41** 个工具。✅ 只读，✍️ 写操作（带 `confirm` 门禁）。
 
 ### 诊断
 | 工具 | 说明 |
 |------|------|
-| ✅ `jq_bridge_status` | 插件连接数、版本、最近 hello |
-| ✅ `jq_health` | 一次探测 `connected` + `loggedIn` |
+| ✅ `jq_bridge_status` | 插件连接数、版本、账号绑定 |
+| ✅ `jq_health` | 一次探测 `connected` + `loggedIn` + 账号池摘要 |
+| ✅ `jq_accounts` | 账号池：uid/昵称/状态/cap/在跑/排队/积分/冷却 |
 
 ### 认证 / 账号
 | 工具 | 说明 |
 |------|------|
-| ✅ `jq_auth_status` | 聚宽登录状态 |
+| ✅ `jq_auth_status` | 聚宽登录状态（可指定 `account`） |
 | ✅ `jq_auth_get_cookie` | 读取 Cookie（敏感） |
 | ✅ `jq_auth_open_login` | 打开登录页供手动登录 |
 | ✅ `jq_auth_refresh` | 刷新登录态 |
-| ✅ `jq_account_limits` | 并行回测/编译上限与会员信息（抓账号接口+会员页） |
+| ✅ `jq_account_limits` | 账号身份、积分与会员信息（并发上限需人工配置） |
 
 ### 策略
 | 工具 | 说明 |
@@ -232,10 +272,11 @@ bin/jq-mcp serve --browser-mode launch --headless         # 之后可用无头
 ### 任务队列 / 批处理（服务端调度）
 | 工具 | 说明 |
 |------|------|
-| ✍️ `jq_batch_submit` | 提交任务队列（可带 `callbackUrl` 回调） |
+| ✍️ `jq_batch_submit` | 提交任务队列；支持 `account`/`placement`/`code`/`codePath`/回调 |
 | ✅ `jq_batch_status` | 批次进度与结果（非阻塞） |
 | ✅ `jq_batch_wait` | 一次阻塞到批次终结，无需客户端 sleep 轮询 |
 | ✅ `jq_batch_events` | 按 `sinceEventId` 增量读事件，可长轮询 |
+| ✍️ `jq_batch_confirm_credit` | 免费额度用完时确认使用积分（或拒绝） |
 
 ### 回测数据
 | 工具 | 说明 |
@@ -309,8 +350,10 @@ jq_backtest_export(backtestId, path="./bt.json")   # sections=stats,result,trade
 聚宽限制「并行编译/回测数量最多 N 个」（N 由账号会员等级决定）。本项目的处理：
 
 - 提交被拒时，错误 `details.maxConcurrent` 会带上 N（从服务端文案解析）。
-- `jq_account_limits` 抓账号接口与会员页，尽力返回 N 与会员信息。
-- 服务端调度器（`jq_batch_*`）用固定工作线程消费共享队列，把并发顶满，并在被平台拒绝时自动收紧上限、退避重试；客户端只负责声明任务。
+- 每账号并发上限用 `jq-mcp accounts cap <alias> <N>` 配置；`jq_account_limits`
+  返回账号身份、积分与会员信息（平台已不再提供可靠的并行数）。
+- 服务端调度器（`jq_batch_*`）按账号发槽位，把各账号并发顶满，
+  并在被平台拒绝时只收紧该账号、退避重试；客户端只负责声明任务。
 
 ---
 
@@ -330,7 +373,7 @@ jq_backtest_export(backtestId, path="./bt.json")   # sections=stats,result,trade
 }
 ```
 
-- 事件类型：`job.started`、`job.done`、`job.failed`、`job.timeout`、`batch.done`。
+- 事件类型：`job.started`、`job.done`、`job.failed`、`job.timeout`、`job.needs_credit`、`batch.done`。
 - **错误日志快速失败**：调度器轮询正式回测时会同时读取错误日志；一旦出现错误，
   立即把任务置为 `failed`（附 `error` 与 `errorLogs`），并立刻发出
   `job.failed` / `batch.done` 事件触发 webhook，而不是等到 `jobTimeout`。

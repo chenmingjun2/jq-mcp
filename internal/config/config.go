@@ -28,6 +28,20 @@ type Browser struct {
 	StartURL     string `json:"start_url"`
 }
 
+// Pool holds account-pool defaults. Per-account overrides live in accounts.json.
+type Pool struct {
+	DefaultCap       int      `json:"default_cap"`
+	MaxFailovers     int      `json:"max_failovers"`
+	DefaultPlacement string   `json:"default_placement"`
+	DefaultAccount   string   `json:"default_account,omitempty"`
+	Browser          string   `json:"browser"`  // chrome-for-testing
+	Channel          string   `json:"channel"`  // stable
+	Headless         bool     `json:"headless"` // pool windows are visible by default
+	UAMode           string   `json:"ua_mode"`  // random|off
+	UAPlatforms      []string `json:"ua_platforms,omitempty"`
+	UABrowsers       []string `json:"ua_browsers,omitempty"`
+}
+
 // Config is the persisted configuration.
 type Config struct {
 	WSAddr   string  `json:"ws_addr"`
@@ -36,6 +50,7 @@ type Config struct {
 	Token    string  `json:"token"`
 	TaskFile string  `json:"task_file"`
 	Browser  Browser `json:"browser"`
+	Pool     Pool    `json:"pool"`
 }
 
 // Default returns the built-in defaults.
@@ -51,6 +66,17 @@ func Default() *Config {
 			UserDataDir:  "",
 			ExtensionDir: "",
 			StartURL:     "https://www.joinquant.com/",
+		},
+		Pool: Pool{
+			DefaultCap:       2,
+			MaxFailovers:     2,
+			DefaultPlacement: "auto",
+			Browser:          "chrome-for-testing",
+			Channel:          "stable",
+			Headless:         false,
+			UAMode:           "random",
+			UAPlatforms:      []string{"windows", "linux", "android", "macos", "ios"},
+			UABrowsers:       []string{"chrome", "chromium", "firefox", "safari"},
 		},
 	}
 }
@@ -77,6 +103,18 @@ func Dir() string {
 
 // DefaultPath is the default config file location.
 func DefaultPath() string { return filepath.Join(Dir(), "config.json") }
+
+// AccountsPath is the account registry path.
+func AccountsPath() string { return filepath.Join(Dir(), "accounts.json") }
+
+// ProfilesDir is the root of managed browser profiles.
+func ProfilesDir() string { return filepath.Join(Dir(), "profiles") }
+
+// BrowsersDir is the root of downloaded browser builds.
+func BrowsersDir() string { return filepath.Join(Dir(), "browsers") }
+
+// ProfileDir returns the directory for one pool account.
+func ProfileDir(alias string) string { return filepath.Join(ProfilesDir(), alias) }
 
 // DefaultUserDataDir returns the default managed-browser profile directory.
 func DefaultUserDataDir() string {
@@ -112,6 +150,30 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Browser.StartURL == "" {
 		cfg.Browser.StartURL = "https://www.joinquant.com/"
+	}
+	if cfg.Pool.DefaultCap <= 0 {
+		cfg.Pool.DefaultCap = 2
+	}
+	if cfg.Pool.MaxFailovers <= 0 {
+		cfg.Pool.MaxFailovers = 2
+	}
+	if cfg.Pool.DefaultPlacement == "" {
+		cfg.Pool.DefaultPlacement = "auto"
+	}
+	if cfg.Pool.Browser == "" {
+		cfg.Pool.Browser = "chrome-for-testing"
+	}
+	if cfg.Pool.Channel == "" {
+		cfg.Pool.Channel = "stable"
+	}
+	if cfg.Pool.UAMode == "" {
+		cfg.Pool.UAMode = "random"
+	}
+	if len(cfg.Pool.UAPlatforms) == 0 {
+		cfg.Pool.UAPlatforms = []string{"windows", "linux", "android", "macos", "ios"}
+	}
+	if len(cfg.Pool.UABrowsers) == 0 {
+		cfg.Pool.UABrowsers = []string{"chrome", "chromium", "firefox", "safari"}
 	}
 	if cfg.Token == "" {
 		token, err := generateToken()

@@ -121,6 +121,13 @@ OpenCode 会为**每个 workspace** 调一次 `setup()`，但所有 workspace �
   jq-mcp 会把它写进批次和事件（`sessionId` 字段）。插件只唤醒事件对应的那个会话。
 - **stream 汇总**：同一会话在 `coalesceMs` 窗口内完成的多个批次会合并成**一次**唤醒，
   摘要里按批次分段；`batch.done` 到达时立即 flush 尚未发出的结果，不会等窗口。
+- **多账号**（0.4.0）：同一批次的任务可以分散到多个账号，事件仍由同一个 daemon 写入
+  同一条 `/api/events` 流；每个 `job.*` 都带 `sessionId` 和 `account`，插件会收到全部
+  N 个任务的完成事件。摘要里的每条结果带 `acct=<alias>`。
+- **积分确认**：免费额度用完时，jq-mcp 发出 `job.needs_credit`（非终态）。插件会
+  **立即唤醒**会话，摘要提示先询问用户，再调用 `jq_batch_confirm_credit`；该唤醒
+  不受 `wakeOn` 限制。确认后任务继续跑，完成时照常按终态事件唤醒。
+
 - **唤醒方式**：`ctx.session.synthetic({delivery:"queue", resume:true})`，不会打断当前 step；
   synthetic 也不触发 prompt hooks，避免把自动消息当成用户输入。
 - **失败处理**：`handleEvent` 抛错时**不推进游标**，退避后重试；此前会静默丢事件。

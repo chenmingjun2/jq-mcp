@@ -13,7 +13,7 @@
 //
 // Enable it from opencode.json (see README.md). Disabled by default;
 // `/jq-loop on|off|status` toggles it at runtime (server-wide).
-import { buildDigest, isTerminalEvent, isFailedEvent, shouldWake } from "./core.mjs";
+import { buildDigest, isCreditEvent, isTerminalEvent, isFailedEvent, shouldWake } from "./core.mjs";
 
 const DEFAULTS = {
   enabled: false,
@@ -173,7 +173,7 @@ function batchState(event, batchId) {
   const key = `${event.daemonId || ""}:${batchId}`;
   let b = SHARED.handled.get(key);
   if (!b) {
-    b = { woke: false };
+    b = { woke: false, creditWoke: false };
     SHARED.handled.set(key, b);
     if (SHARED.handled.size > 500) {
       SHARED.handled.delete(SHARED.handled.keys().next().value);
@@ -240,6 +240,29 @@ async function flush(sid, reason = "stream") {
 async function handleEvent(ev) {
   const sessionID = ev.sessionId;
   if (!sessionID) return; // batch submitted outside OpenCode (scripts/CLI)
+
+  // Paid-credit approval is a blocking decision: wake even when wakeOn=batch,
+  // otherwise the batch would never reach batch.done.
+  if (isCreditEvent(ev) && ev.job) {
+    const b = batchState(ev, ev.batchId);
+    if (!b.creditWoke) {
+      b.creditWoke =
+        (await wake(
+          sessionID,
+          (iteration) =>
+            buildDigest({
+              batchId: ev.batchId,
+              jobs: [ev.job],
+              iteration,
+              maxIterations: Number(opt().maxIterations) || 0,
+              instructions: opt().instructions,
+              phase: "credit",
+            }),
+          "credit",
+        )) || b.creditWoke;
+    }
+    return;
+  }
 
   if (opt().wakeOn === "failed" && isFailedEvent(ev) && ev.job) {
     const b = batchState(ev, ev.batchId);

@@ -8,6 +8,7 @@
 //	jq-mcp proxy           stdio MCP adapter forwarding to the daemon
 //	jq-mcp status          show the running daemon for a profile
 //	jq-mcp stop            stop the daemon for a profile
+//	jq-mcp accounts ...    manage pool browser profiles (add/open/status/...)
 package main
 
 import (
@@ -34,6 +35,12 @@ func main() {
 			mode, args = app.ModeDaemon, args[1:]
 		case "proxy":
 			mode, args = app.ModeProxy, args[1:]
+		case "accounts":
+			if err := app.AccountsCLI(context.Background(), args[1:]); err != nil {
+				fmt.Fprintf(os.Stderr, "jq-mcp accounts: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "status", "stop":
 			cmd, rest := args[0], args[1:]
 			profile := argValue(rest, "profile", "default")

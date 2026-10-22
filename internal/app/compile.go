@@ -9,6 +9,7 @@ import (
 	"github.com/jqhelper/jq-mcp/internal/apierr"
 	"github.com/jqhelper/jq-mcp/internal/jq"
 	"github.com/jqhelper/jq-mcp/internal/mcp"
+	"github.com/jqhelper/jq-mcp/internal/sched"
 )
 
 // registerCompileTool adds jq_strategy_compile: it triggers the edit page's
@@ -24,6 +25,7 @@ func registerCompileTool(s *mcp.Server, d deps) {
 			"start":      mcp.Str("可选，编译用开始日期 YYYY-MM-DD（默认沿用编辑页表单值）"),
 			"end":        mcp.Str("可选，编译用结束日期 YYYY-MM-DD"),
 			"useCredit":  mcp.Bool("额度耗尽时消耗积分继续（聚宽会提示 50000）"),
+			"account":    mcp.Str("可选：账号池别名"),
 		}, "strategyId"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
@@ -31,6 +33,7 @@ func registerCompileTool(s *mcp.Server, d deps) {
 				Start      string `json:"start"`
 				End        string `json:"end"`
 				UseCredit  bool   `json:"useCredit"`
+				Account    string `json:"account"`
 			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
@@ -38,21 +41,39 @@ func registerCompileTool(s *mcp.Server, d deps) {
 			if a.StrategyID == "" {
 				return nil, apierr.Usage("strategyId 不能为空")
 			}
-			res, err := d.jq.BacktestRun(ctx, jq.BacktestRunInput{
+			dd := d
+			dd.jq = d.jq.WithAccount(a.Account)
+			in := jq.BacktestRunInput{
 				StrategyID: a.StrategyID,
 				Start:      a.Start,
 				End:        a.End,
 				Compile:    true,
-				UseCredit:  a.UseCredit,
-			})
+				UseCredit:  false,
+			}
+			res, err := dd.jq.BacktestRun(ctx, in)
+			if err != nil && sched.IsQuotaError(err) {
+				acct := a.Account
+				if acct == "" && d.sched != nil {
+					acct = d.sched.DefaultAccount()
+				}
+				if d.sched != nil && acct != "" {
+					d.sched.MarkFreeExhausted(acct, apierr.From(err).Message)
+				}
+				if !a.UseCredit {
+					return nil, creditRequiredError(err, a.Account)
+				}
+				in.UseCredit = true
+				res, err = dd.jq.BacktestRun(ctx, in)
+			}
 			if err != nil {
 				return nil, err
 			}
-			errLogs, normLogs := collectCompileLogs(ctx, d, a.StrategyID, res.ID, res.ListID)
+			errLogs, normLogs := collectCompileLogs(ctx, dd, a.StrategyID, res.ID, res.ListID)
 			return map[string]any{
 				"id":            res.ID,
 				"listId":        res.ListID,
 				"mode":          "compile",
+				"account":       a.Account,
 				"ok":            len(errLogs) == 0,
 				"compileErrors": errLogs,
 				"logs":          tail(normLogs, 20),
@@ -62,11 +83,17 @@ func registerCompileTool(s *mcp.Server, d deps) {
 
 	s.Register(mcp.Tool{
 		Name: "jq_account_limits",
-		Description: "读取账号的并行编译/回测上限与会员信息（抓账号接口与会员权益页，尽力解析；" +
-			"无法确定时返回原始候选字段供排查）。",
-		InputSchema: mcp.Obj(map[string]any{}),
+		Description: "读取账号身份、可用积分与会员信息；并发上限请用 jq-mcp accounts cap 配置，" +
+			"平台拒绝时会自动收紧。",
+		InputSchema: mcp.Obj(map[string]any{"account": mcp.Str("可选：账号池别名")}),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			return d.jq.AccountLimits(ctx)
+			var a struct {
+				Account string `json:"account"`
+			}
+			if err := decodeArgs(args, &a); err != nil {
+				return nil, err
+			}
+			return d.jq.WithAccount(a.Account).AccountLimits(ctx)
 		},
 	})
 }

@@ -87,6 +87,8 @@ Upgrade: websocket
 
 `no_extension` · `not_authenticated` · `not_found` · `usage_error` · `api_error` · `network_error` · `timeout` · `internal_error`
 
+MCP 侧另有 `credit_required`：同步回测/编译遇到免费额度耗尽，确认后可带 `useCredit=true` 重试。
+
 ---
 
 ## 2. MCP 工具
@@ -99,17 +101,19 @@ Upgrade: websocket
 
 | 工具 | 参数 | 说明 |
 |------|------|------|
-| `jq_bridge_status` | — | 插件连接数、最近 hello |
-| `jq_health` | — | 一次探测 connected + loggedIn |
+| `jq_bridge_status` | — | 插件连接数、账号绑定、最近 hello |
+| `jq_health` | — | 一次探测 connected + loggedIn + 账号池摘要 |
+| `jq_accounts` | `refresh?` | 账号池快照（uid/状态/cap/在跑/积分/冷却） |
 
 ### 2.2 认证
 
 | 工具 | 参数 |
 |------|------|
-| `jq_auth_status` | — |
-| `jq_auth_get_cookie` | —（敏感） |
-| `jq_auth_open_login` | `url?` |
-| `jq_auth_refresh` | — |
+| `jq_auth_status` | `account?` |
+| `jq_auth_get_cookie` | `account?`（敏感） |
+| `jq_auth_open_login` | `url?`, `account?` |
+| `jq_auth_refresh` | `account?` |
+| `jq_account_limits` | `account?` |
 
 ### 2.3 策略
 
@@ -130,7 +134,7 @@ Upgrade: websocket
 
 | 工具 | 参数 | 备注 |
 |------|------|------|
-| `jq_backtest_run` | `strategyId`, `start`, `end?`, `capital?`, `frequency?`, `compile?` | 登记任务 |
+| `jq_backtest_run` | `strategyId`, `start`, `end?`, `capital?`, `frequency?`, `compile?`, `account?` | 登记任务 |
 | `jq_backtest_list` | `strategyId`, `status?`, `limit?`, `compile?` | |
 | `jq_backtest_wait` | `backtestId`, `timeoutSeconds?`, `pollIntervalSeconds?` | |
 | `jq_backtest_cancel` | `backtestId`, `confirm` | 需 confirm |
@@ -167,12 +171,24 @@ Upgrade: websocket
 
 | 工具 | 参数 | 说明 |
 |------|------|------|
-| `jq_batch_submit` | `jobs[]`, `maxConcurrent?`, `workers?`, `callbackUrl?`, `callbackSecret?`, `callbackOn?` | 非阻塞入队 |
-| `jq_batch_status` | `batchId?`, `limit?` | 快照 |
-| `jq_batch_wait` | `batchId`, `timeoutSeconds?`, `sinceEventId?`, `includeEvents?` | 阻塞到终结；`since>0` 有事即返回 |
+| `jq_batch_submit` | `jobs[]`, `account?`, `placement?`, `maxConcurrent?`, `workers?`, `callbackUrl?`, `callbackSecret?`, `callbackOn?` | 非阻塞入队；job 支持 `strategyKey/name/code/codePath/account`；先用免费额度 |
+| `jq_batch_status` | `batchId?`, `limit?` | 快照（含 `countsByAccount`） |
+| `jq_batch_wait` | `batchId`, `timeoutSeconds?`, `sinceEventId?`, `includeEvents?` | 阻塞到终结或需要积分确认 |
 | `jq_batch_events` | `batchId`, `sinceEventId?`, `waitSeconds?`, `limit?` | 事件游标 / 长轮询 |
+| `jq_batch_confirm_credit` | `batchId`, `approve`, `tags?`, `confirm` | 免费额度用完后确认/拒绝使用积分 |
 
-事件类型：`job.started`、`job.done`、`job.failed`、`job.timeout`、`batch.done`。
+事件类型：`job.started`、`job.done`、`job.failed`、`job.timeout`、`job.needs_credit`、`batch.done`。
+`JobState` 额外字段：`account`、`accountUid`、`attempts`、`creditRequired`、
+`creditReason`、`creditAccount`；状态新增 `needs_confirmation`。
+`jq_batch_wait` 遇到待确认任务会立即返回 `creditRequired:true` 与
+`needsConfirmation[]`，不会阻塞到超时。
+
+### 2.8 账号池
+
+- `jq_accounts`：`{default, cap, connected, accounts:[{alias,uid,nickname,state,cap,inFlight,queued,credits,creditsKnown,cooldownUntil,lastError}], clients:[...]}`。
+- 账号状态：`pending_login`、`ready`、`busy`、`cooling`、`free_exhausted`（免费额度用完，仅接受已确认的积分任务）、`quota_exhausted`、`logged_out`、`disabled`。
+- 只有带 `code`/`codePath` 的 job 才能自动换号；`strategyId` 视为钉住默认账号。
+- 提交后掉线不会重跑，避免重复消耗额度：调度器只重试读取，最终失败时带 `remoteId`。
 `jq_batch_events` 返回 `{events, nextEventId, done, hasMore}`，把 `nextEventId`
 作为下次的 `sinceEventId` 即可增量消费；`waitSeconds>0` 且无新事件时服务端最多阻塞该秒数。
 

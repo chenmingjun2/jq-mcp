@@ -21,6 +21,10 @@ type Launcher struct {
 	path   string
 }
 
+// ExtensionDir resolves the bundled jqhelper directory (exported for the pool
+// launcher).
+func ExtensionDir(explicit string) (string, error) { return resolveExtensionDir(explicit) }
+
 // Launch starts the browser and returns immediately. Callers should defer Stop.
 // bridgeURL and token are written into the extension directory as
 // default-config.json so the freshly launched extension connects automatically.
@@ -136,6 +140,7 @@ func chromeCandidates() []string {
 	}
 }
 
+// resolveExtensionDir locates the bundled extension directory.
 func resolveExtensionDir(explicit string) (string, error) {
 	candidates := []string{}
 	if explicit != "" {

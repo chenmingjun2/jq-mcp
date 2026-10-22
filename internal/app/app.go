@@ -19,10 +19,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jqhelper/jq-mcp/internal/account"
 	"github.com/jqhelper/jq-mcp/internal/apierr"
 	"github.com/jqhelper/jq-mcp/internal/bridge"
 	"github.com/jqhelper/jq-mcp/internal/browser"
@@ -35,7 +37,7 @@ import (
 )
 
 // Version is the server version reported during MCP initialize.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // Mode selects how the process participates in the daemon/client split.
 type Mode string
@@ -106,8 +108,16 @@ func runDaemon(ctx context.Context, opts Options, serveStdio bool) error {
 	}
 	defer lease.Close()
 
+	acctReg, err := account.Load(config.AccountsPath())
+	if err != nil {
+		return err
+	}
+
 	// Bridge WebSocket server.
 	hub := bridge.NewHub(cfg.Token, cfg.WSPath, logger)
+	if def := acctReg.DefaultAlias(); def != "" {
+		hub.SetDefaultAccount(def)
+	}
 	listener, err := net.Listen("tcp", cfg.WSAddr)
 	if err != nil {
 		return fmt.Errorf("监听 %s 失败: %w", cfg.WSAddr, err)
@@ -172,8 +182,15 @@ func runDaemon(ctx context.Context, opts Options, serveStdio bool) error {
 	}
 	sch := sched.New(client, tasks, workers, maxConcurrent, logger)
 	sch.SetDaemonID(daemonID)
+	sch.SetProvisionDir(filepath.Join(config.Dir(), "accounts"))
+	sch.SetMaxFailovers(cfg.Pool.MaxFailovers)
 	sch.Start()
 	defer sch.Stop()
+
+	pool := newPoolRuntime(acctReg, hub, client, sch, tasks, cfg.Pool.DefaultCap, maxConcurrent, logger)
+	pool.start(ctx)
+	client.SetAccountResolver(pool.resolveAccount)
+	client.SetDefaultAccount(pool.defaultAccount)
 
 	server := mcp.NewServer("jq-mcp", Version, logger)
 
@@ -196,6 +213,16 @@ func runDaemon(ctx context.Context, opts Options, serveStdio bool) error {
 		if ev.Job != nil {
 			data["tag"] = ev.Job.Tag
 			data["status"] = ev.Job.Status
+			if ev.Job.Account != "" {
+				data["account"] = ev.Job.Account
+			}
+			if ev.Job.CreditAccount != "" {
+				data["creditAccount"] = ev.Job.CreditAccount
+			}
+			if ev.Job.CreditRequired {
+				data["creditRequired"] = true
+				data["creditReason"] = ev.Job.CreditReason
+			}
 			if ev.Job.TaskID != "" {
 				data["taskId"] = ev.Job.TaskID
 			}
@@ -227,7 +254,7 @@ func runDaemon(ctx context.Context, opts Options, serveStdio bool) error {
 		})
 	})
 
-	d := deps{jq: client, tasks: tasks, hub: hub, sched: sch}
+	d := deps{jq: client, tasks: tasks, hub: hub, sched: sch, pool: pool, accounts: acctReg}
 	registerTools(server, d)
 	registerBatchTools(server, d)
 

@@ -15,6 +15,7 @@ const (
 	CodeNetwork          = "network_error"
 	CodeTimeout          = "timeout"
 	CodeInternal         = "internal_error"
+	CodeCreditRequired   = "credit_required"
 )
 
 // Error is a coded error that can be serialized into a bridge RPC error or an

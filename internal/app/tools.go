@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jqhelper/jq-mcp/internal/account"
 	"github.com/jqhelper/jq-mcp/internal/apierr"
 	"github.com/jqhelper/jq-mcp/internal/bridge"
 	"github.com/jqhelper/jq-mcp/internal/jq"
@@ -19,10 +20,12 @@ import (
 )
 
 type deps struct {
-	jq    *jq.Client
-	tasks *task.Manager
-	hub   *bridge.Hub
-	sched *sched.Scheduler
+	jq       *jq.Client
+	tasks    *task.Manager
+	hub      *bridge.Hub
+	sched    *sched.Scheduler
+	pool     *poolRuntime
+	accounts *account.Registry
 }
 
 func decodeArgs(args json.RawMessage, v any) error {
@@ -48,6 +51,14 @@ func rawJSON(v any) json.RawMessage {
 		return json.RawMessage("{}")
 	}
 	return b
+}
+
+// creditRequiredError turns a free-quota rejection into an actionable code:
+// clients should re-run with useCredit=true only after the user confirms.
+func creditRequiredError(err error, account string) error {
+	e := apierr.New(apierr.CodeCreditRequired, "免费回测额度已用完；确认后可传 useCredit=true 消耗积分重试")
+	e.Details = map[string]any{"account": account, "original": apierr.From(err).Message}
+	return e
 }
 
 // stringList accepts either a JSON array of strings or a single comma/space
@@ -97,8 +108,32 @@ func registerDiagnosticTools(s *mcp.Server, d deps) {
 	})
 
 	s.Register(mcp.Tool{
+		Name:        "jq_accounts",
+		Description: "查看账号池：每个账号的 uid/昵称/登录态、状态、cap、在跑数、排队数、积分、冷却与最近错误。单账号时也会返回 default 账号。",
+		InputSchema: mcp.Obj(map[string]any{
+			"refresh": mcp.Bool("重新读取 accounts.json 并刷新快照"),
+		}),
+		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
+			var a struct {
+				Refresh bool `json:"refresh"`
+			}
+			if err := decodeArgs(args, &a); err != nil {
+				return nil, err
+			}
+			if d.pool == nil {
+				return map[string]any{"accounts": []any{}, "connected": d.hub.Connected()}, nil
+			}
+			if a.Refresh {
+				d.pool.reload()
+				d.pool.healthCheck()
+			}
+			return d.pool.snapshot(), nil
+		},
+	})
+
+	s.Register(mcp.Tool{
 		Name:        "jq_health",
-		Description: "一次探测桥接连接与聚宽登录态，返回 connected 与 loggedIn。",
+		Description: "一次探测桥接连接与聚宽登录态，返回 connected、loggedIn 与账号池摘要。",
 		InputSchema: mcp.Obj(map[string]any{}),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			out := map[string]any{"connected": d.hub.Connected()}
@@ -113,6 +148,10 @@ func registerDiagnosticTools(s *mcp.Server, d deps) {
 					out["authError"] = apierr.From(err)
 				}
 			}
+			if d.sched != nil {
+				out["accounts"] = d.sched.Accounts()
+				out["cap"] = d.sched.Cap()
+			}
 			return out, nil
 		},
 	})
@@ -123,45 +162,65 @@ func registerDiagnosticTools(s *mcp.Server, d deps) {
 func registerAuthTools(s *mcp.Server, d deps) {
 	s.Register(mcp.Tool{
 		Name:        "jq_auth_status",
-		Description: "检测浏览器中聚宽账号的登录状态，返回 loggedIn。",
-		InputSchema: mcp.Obj(map[string]any{}),
+		Description: "检测浏览器中聚宽账号的登录状态，返回 loggedIn；可指定账号池别名。",
+		InputSchema: mcp.Obj(map[string]any{"account": mcp.Str("可选：账号池别名")}),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			return d.jq.AuthStatus(ctx)
+			var a struct {
+				Account string `json:"account"`
+			}
+			if err := decodeArgs(args, &a); err != nil {
+				return nil, err
+			}
+			return d.jq.WithAccount(a.Account).AuthStatus(ctx)
 		},
 	})
 
 	s.Register(mcp.Tool{
 		Name:        "jq_auth_get_cookie",
 		Description: "读取浏览器中聚宽域名的 Cookie（含 HttpOnly）。返回值属于敏感凭据，请勿记录或外传。",
-		InputSchema: mcp.Obj(map[string]any{}),
+		InputSchema: mcp.Obj(map[string]any{"account": mcp.Str("可选：账号池别名")}),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			return d.jq.Cookie(ctx)
+			var a struct {
+				Account string `json:"account"`
+			}
+			if err := decodeArgs(args, &a); err != nil {
+				return nil, err
+			}
+			return d.jq.WithAccount(a.Account).Cookie(ctx)
 		},
 	})
 
 	s.Register(mcp.Tool{
 		Name:        "jq_auth_open_login",
-		Description: "在浏览器打开聚宽登录页，提示用户手动完成登录或续期。",
+		Description: "在指定账号的浏览器打开聚宽登录页，提示用户手动完成登录或续期。",
 		InputSchema: mcp.Obj(map[string]any{
-			"url": mcp.Str("可选，自定义登录页地址"),
+			"url":     mcp.Str("可选，自定义登录页地址"),
+			"account": mcp.Str("可选：账号池别名"),
 		}),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
-				URL string `json:"url"`
+				URL     string `json:"url"`
+				Account string `json:"account"`
 			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
 			}
-			return d.jq.OpenLogin(ctx, a.URL)
+			return d.jq.WithAccount(a.Account).OpenLogin(ctx, a.URL)
 		},
 	})
 
 	s.Register(mcp.Tool{
 		Name:        "jq_auth_refresh",
 		Description: "重新加载聚宽标签页以续期登录态，然后返回最新登录状态。",
-		InputSchema: mcp.Obj(map[string]any{}),
+		InputSchema: mcp.Obj(map[string]any{"account": mcp.Str("可选：账号池别名")}),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			return d.jq.Refresh(ctx)
+			var a struct {
+				Account string `json:"account"`
+			}
+			if err := decodeArgs(args, &a); err != nil {
+				return nil, err
+			}
+			return d.jq.WithAccount(a.Account).Refresh(ctx)
 		},
 	})
 }
@@ -173,17 +232,21 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 		Name:        "jq_strategy_list",
 		Description: "列出策略与文件夹。返回 items（id/internalId/name/type/updatedAt/runCount/backtestCount）与 folders（fid/name）。",
 		InputSchema: mcp.Obj(map[string]any{
-			"fid":   mcp.Str("可选，只列出该文件夹"),
-			"limit": mcp.Int("最多返回条数，默认 50"),
-			"all":   mcp.Bool("递归文件夹拉取全部策略"),
-			"sort":  mcp.StrEnum("排序方式", "updated", "name", "created"),
+			"fid":     mcp.Str("可选，只列出该文件夹"),
+			"limit":   mcp.Int("最多返回条数，默认 50"),
+			"all":     mcp.Bool("递归文件夹拉取全部策略"),
+			"sort":    mcp.StrEnum("排序方式", "updated", "name", "created"),
+			"account": mcp.Str("可选：账号池别名"),
 		}),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			var a jq.StrategyListInput
+			var a struct {
+				jq.StrategyListInput
+				Account string `json:"account"`
+			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
 			}
-			return d.jq.StrategyList(ctx, a)
+			return d.jq.WithAccount(a.Account).StrategyList(ctx, a.StrategyListInput)
 		},
 	})
 
@@ -191,11 +254,13 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 		Name:        "jq_strategy_find",
 		Description: "按名称查找策略，返回精确匹配、模糊匹配与首个命中项。",
 		InputSchema: mcp.Obj(map[string]any{
-			"name": mcp.Str("策略名称或片段"),
+			"name":    mcp.Str("策略名称或片段"),
+			"account": mcp.Str("可选：账号池别名"),
 		}, "name"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
-				Name string `json:"name"`
+				Name    string `json:"name"`
+				Account string `json:"account"`
 			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
@@ -203,7 +268,7 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			if a.Name == "" {
 				return nil, apierr.Usage("name 不能为空")
 			}
-			return d.jq.StrategyFind(ctx, a.Name)
+			return d.jq.WithAccount(a.Account).StrategyFind(ctx, a.Name)
 		},
 	})
 
@@ -213,11 +278,13 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 		InputSchema: mcp.Obj(map[string]any{
 			"strategyId":  mcp.Str("策略 ID（来自 jq_strategy_list）"),
 			"includeCode": mcp.Bool("是否返回源码，默认 false"),
+			"account":     mcp.Str("可选：账号池别名"),
 		}, "strategyId"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
 				StrategyID  string `json:"strategyId"`
 				IncludeCode bool   `json:"includeCode"`
+				Account     string `json:"account"`
 			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
@@ -225,7 +292,7 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			if a.StrategyID == "" {
 				return nil, apierr.Usage("strategyId 不能为空")
 			}
-			return d.jq.StrategyGet(ctx, a.StrategyID, a.IncludeCode)
+			return d.jq.WithAccount(a.Account).StrategyGet(ctx, a.StrategyID, a.IncludeCode)
 		},
 	})
 
@@ -237,16 +304,20 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			"code":     mcp.Str("可选的初始 Python 源码"),
 			"type":     mcp.StrEnum("策略类型，默认 stock", "stock", "futures"),
 			"folderId": mcp.Str("可选，目标文件夹 fid"),
+			"account":  mcp.Str("可选：账号池别名"),
 		}, "name"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			var a jq.StrategyCreateInput
+			var a struct {
+				jq.StrategyCreateInput
+				Account string `json:"account"`
+			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
 			}
 			if a.Name == "" {
 				return nil, apierr.Usage("name 不能为空")
 			}
-			return d.jq.StrategyCreate(ctx, a)
+			return d.jq.WithAccount(a.Account).StrategyCreate(ctx, a.StrategyCreateInput)
 		},
 	})
 
@@ -258,11 +329,13 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			"name":       mcp.Str("新的策略名称（可选）"),
 			"code":       mcp.Str("新的完整源码（可选）"),
 			"confirm":    mcp.Bool("必须为 true，确认覆盖远端策略内容"),
+			"account":    mcp.Str("可选：账号池别名"),
 		}, "strategyId", "confirm"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
 				jq.StrategySaveInput
-				Confirm bool `json:"confirm"`
+				Confirm bool   `json:"confirm"`
+				Account string `json:"account"`
 			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
@@ -276,7 +349,7 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			if a.Name == "" && a.Code == "" {
 				return nil, apierr.Usage("name 与 code 至少提供一个")
 			}
-			return d.jq.StrategySave(ctx, a.StrategySaveInput)
+			return d.jq.WithAccount(a.Account).StrategySave(ctx, a.StrategySaveInput)
 		},
 	})
 
@@ -287,12 +360,14 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			"strategyId": mcp.Str("源策略 ID"),
 			"name":       mcp.Str("副本名称，默认“原名-copy”"),
 			"confirm":    mcp.Bool("必须为 true，确认创建副本"),
+			"account":    mcp.Str("可选：账号池别名（源与副本同一账号）"),
 		}, "strategyId", "confirm"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
 				StrategyID string `json:"strategyId"`
 				Name       string `json:"name"`
 				Confirm    bool   `json:"confirm"`
+				Account    string `json:"account"`
 			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
@@ -303,7 +378,8 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			if err := requireConfirm(a.Confirm, "jq_strategy_clone"); err != nil {
 				return nil, err
 			}
-			src, err := d.jq.StrategyGet(ctx, a.StrategyID, true)
+			client := d.jq.WithAccount(a.Account)
+			src, err := client.StrategyGet(ctx, a.StrategyID, true)
 			if err != nil {
 				return nil, err
 			}
@@ -316,7 +392,7 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			if name == "" {
 				name = detail.Name + "-copy"
 			}
-			return d.jq.StrategyCreate(ctx, jq.StrategyCreateInput{Name: name, Code: detail.Code, Type: "stock"})
+			return client.StrategyCreate(ctx, jq.StrategyCreateInput{Name: name, Code: detail.Code, Type: "stock"})
 		},
 	})
 
@@ -326,11 +402,13 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 		InputSchema: mcp.Obj(map[string]any{
 			"strategyId": mcp.Str("策略 ID"),
 			"confirm":    mcp.Bool("必须为 true，确认删除"),
+			"account":    mcp.Str("可选：账号池别名"),
 		}, "strategyId", "confirm"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
 			var a struct {
 				StrategyID string `json:"strategyId"`
 				Confirm    bool   `json:"confirm"`
+				Account    string `json:"account"`
 			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
@@ -341,7 +419,7 @@ func registerStrategyTools(s *mcp.Server, d deps) {
 			if err := requireConfirm(a.Confirm, "jq_strategy_delete"); err != nil {
 				return nil, err
 			}
-			return d.jq.StrategyDelete(ctx, a.StrategyID)
+			return d.jq.WithAccount(a.Account).StrategyDelete(ctx, a.StrategyID)
 		},
 	})
 }
@@ -432,23 +510,49 @@ func registerBacktestTools(s *mcp.Server, d deps) {
 			"frequency":  mcp.StrEnum("频率，默认 day", "day", "minute"),
 			"compile":    mcp.Bool("true 表示只做编译运行"),
 			"useCredit":  mcp.Bool("额度耗尽时消耗积分继续（聚宽会提示 50000）"),
+			"account":    mcp.Str("可选：账号池别名；默认用 default 账号"),
 		}, "strategyId", "start"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			var a jq.BacktestRunInput
+			var a struct {
+				jq.BacktestRunInput
+				Account string `json:"account"`
+			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
 			}
 			if a.StrategyID == "" || a.Start == "" {
 				return nil, apierr.Usage("strategyId 与 start 为必填")
 			}
-			res, err := d.jq.BacktestRun(ctx, a)
+			client := d.jq
+			if a.Account != "" {
+				client = d.jq.WithAccount(a.Account)
+			}
+			free := a.BacktestRunInput
+			free.UseCredit = false
+			res, err := client.BacktestRun(ctx, free)
+			if err != nil && sched.IsQuotaError(err) {
+				acct := a.Account
+				if acct == "" && d.sched != nil {
+					acct = d.sched.DefaultAccount()
+				}
+				if d.sched != nil && acct != "" {
+					d.sched.MarkFreeExhausted(acct, apierr.From(err).Message)
+				}
+				if !a.UseCredit {
+					return nil, creditRequiredError(err, a.Account)
+				}
+				withCredit := a.BacktestRunInput
+				withCredit.UseCredit = true
+				res, err = client.BacktestRun(ctx, withCredit)
+			}
 			if err != nil {
 				return nil, err
 			}
-			t := d.tasks.Add(runTask(a, res))
+			t := d.tasks.Add(runTask(a.BacktestRunInput, res, a.Account))
 			return map[string]any{
 				"taskId": t.ID, "id": res.ID, "listId": res.ListID,
 				"strategyId": a.StrategyID, "mode": t.Mode, "status": "running",
+				"account": a.Account,
 			}, nil
 		},
 	})
@@ -461,16 +565,20 @@ func registerBacktestTools(s *mcp.Server, d deps) {
 			"status":     mcp.StrEnum("过滤状态，默认 all", "all", "running", "done", "failed", "cancelled"),
 			"limit":      mcp.Int("最多返回条数，默认 50"),
 			"compile":    mcp.Bool("读取编译运行列表"),
+			"account":    mcp.Str("可选：账号池别名"),
 		}, "strategyId"),
 		Handler: func(ctx context.Context, args json.RawMessage) (any, error) {
-			var a jq.BacktestListInput
+			var a struct {
+				jq.BacktestListInput
+				Account string `json:"account"`
+			}
 			if err := decodeArgs(args, &a); err != nil {
 				return nil, err
 			}
 			if a.StrategyID == "" {
 				return nil, apierr.Usage("strategyId 不能为空")
 			}
-			return d.jq.BacktestList(ctx, a)
+			return d.jq.WithAccount(a.Account).BacktestList(ctx, a.BacktestListInput)
 		},
 	})
 
@@ -594,16 +702,36 @@ func registerBacktestTools(s *mcp.Server, d deps) {
 				if c, ok := run["compile"].(bool); ok {
 					in.Compile = c
 				}
+				if u, ok := run["useCredit"].(bool); ok {
+					in.UseCredit = u
+				}
 				if in.Start == "" {
 					results = append(results, map[string]any{"start": in.Start, "error": "start 不能为空"})
 					continue
 				}
-				res, err := d.jq.BacktestRun(ctx, in)
+				free := in
+				free.UseCredit = false
+				res, err := d.jq.BacktestRun(ctx, free)
+				if err != nil && in.UseCredit && sched.IsQuotaError(err) {
+					free.UseCredit = true
+					res, err = d.jq.BacktestRun(ctx, free)
+				}
 				if err != nil {
-					results = append(results, map[string]any{"start": in.Start, "end": in.End, "error": apierr.From(err)})
+					item := map[string]any{"start": in.Start, "end": in.End, "error": apierr.From(err)}
+					if !in.UseCredit && sched.IsQuotaError(err) {
+						if d.sched != nil {
+							acct := d.sched.DefaultAccount()
+							if acct != "" {
+								d.sched.MarkFreeExhausted(acct, apierr.From(err).Message)
+							}
+						}
+						item["creditRequired"] = true
+						item["hint"] = "免费额度已用完；确认后对该条传 useCredit=true 重试"
+					}
+					results = append(results, item)
 					continue
 				}
-				t := d.tasks.Add(runTask(in, res))
+				t := d.tasks.Add(runTask(in, res, ""))
 				results = append(results, map[string]any{
 					"taskId": t.ID, "id": res.ID, "listId": res.ListID,
 					"start": in.Start, "end": in.End, "mode": t.Mode,
@@ -987,7 +1115,7 @@ func registerLocalTools(s *mcp.Server, d deps) {
 
 // --------------------------------------------------------------- shared helpers
 
-func runTask(in jq.BacktestRunInput, res jq.BacktestRunResult) task.Task {
+func runTask(in jq.BacktestRunInput, res jq.BacktestRunResult, account string) task.Task {
 	mode := "backtest"
 	if in.Compile {
 		mode = "compile"
@@ -1001,6 +1129,7 @@ func runTask(in jq.BacktestRunInput, res jq.BacktestRunResult) task.Task {
 		Frequency:  in.Frequency,
 		RemoteID:   res.ID,
 		ListID:     res.ListID,
+		Account:    account,
 		Status:     task.StatusRunning,
 	}
 }

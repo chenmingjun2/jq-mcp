@@ -13,27 +13,33 @@ const OFFSCREEN_PATH = "offscreen.html";
 
 // Fallback in-worker client, used only when the offscreen API is unavailable.
 let client = null;
-let config = { wsUrl: DEFAULT_URL, token: "" };
+let config = { wsUrl: DEFAULT_URL, token: "", alias: "", daemonProfile: "" };
 let lastStatus = { connected: false };
 let starting = false;
 let offscreenBroken = false;
 
 async function loadConfig() {
-  const stored = await chrome.storage.local.get({ wsUrl: "", token: "" });
-  config = { wsUrl: stored.wsUrl || DEFAULT_URL, token: stored.token || "" };
+  const stored = await chrome.storage.local.get({ wsUrl: "", token: "", alias: "", daemonProfile: "" });
+  config = {
+    wsUrl: stored.wsUrl || DEFAULT_URL,
+    token: stored.token || "",
+    alias: stored.alias || "",
+    daemonProfile: stored.daemonProfile || "",
+  };
   // Managed-launch bootstrap: jq-mcp writes default-config.json next to the
   // extension so a freshly launched browser can connect without manual setup.
-  if (!config.token) {
-    try {
-      const res = await fetch(chrome.runtime.getURL("default-config.json"));
-      if (res.ok) {
-        const def = await res.json();
-        config.wsUrl = stored.wsUrl || def.wsUrl || DEFAULT_URL;
-        config.token = stored.token || def.token || "";
-      }
-    } catch (_) {
-      /* no bootstrap file; wait for manual configuration */
+  // Read it even when a token exists: the pool uses `alias` to label windows.
+  try {
+    const res = await fetch(chrome.runtime.getURL("default-config.json"));
+    if (res.ok) {
+      const def = await res.json();
+      config.wsUrl = stored.wsUrl || def.wsUrl || DEFAULT_URL;
+      config.token = stored.token || def.token || "";
+      config.alias = stored.alias || def.alias || "";
+      config.daemonProfile = stored.daemonProfile || def.daemonProfile || "";
     }
+  } catch (_) {
+    /* no bootstrap file; wait for manual configuration */
   }
 }
 
@@ -99,6 +105,8 @@ async function startClient() {
     client = new BridgeClient({
       url: config.wsUrl,
       token: config.token,
+      alias: config.alias,
+      daemonProfile: config.daemonProfile,
       onRequest: async (method, params) => {
         if (!config.token) throw jqError(CODES.noExtension, "插件尚未配置 token，请在选项页填写");
         return handle(method, params);

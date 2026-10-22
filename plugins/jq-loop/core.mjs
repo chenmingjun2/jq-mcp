@@ -2,9 +2,14 @@
 // tested with `node --test plugins/jq-loop/core.test.mjs`.
 
 export const TERMINAL_EVENT_TYPES = new Set(["job.done", "job.failed", "job.timeout"]);
+export const CREDIT_EVENT_TYPES = new Set(["job.needs_credit"]);
 
 export function isTerminalEvent(ev) {
   return !!ev && TERMINAL_EVENT_TYPES.has(ev.type);
+}
+
+export function isCreditEvent(ev) {
+  return !!ev && CREDIT_EVENT_TYPES.has(ev.type);
 }
 
 export function isFailedEvent(ev) {
@@ -24,10 +29,13 @@ export function jobResult(job) {
     tag: job?.tag || job?.taskId || job?.id || "job",
     status: job?.status || "unknown",
     mode: job?.compile ? "compile" : "backtest",
+    account: job?.account || job?.creditAccount || null,
     metrics: normalizeMetrics(job?.metrics),
-    error: job?.error || null,
+    error: job?.error || job?.creditReason || null,
     errorLogs: Array.isArray(job?.errorLogs) ? job.errorLogs : null,
     id: job?.id || null,
+    creditRequired: !!job?.creditRequired,
+    creditReason: job?.creditReason || null,
     elapsedMs: Number.isFinite(started) && Number.isFinite(ended) ? ended - started : null,
   };
 }
@@ -55,7 +63,7 @@ export function buildDigest({
   maxJobs = 30,
   maxErrorLines = 4,
   instructions = "",
-  phase = "batch", // batch | stream | job | failed
+  phase = "batch", // batch | stream | job | failed | credit
 }) {
   const results = (jobs || []).map(jobResult);
   const counts = { done: 0, failed: 0, timeout: 0 };
@@ -64,6 +72,30 @@ export function buildDigest({
   const failed = results.filter((r) => r.status !== "done");
   const done = results.filter((r) => r.status === "done");
   const lines = [];
+
+  if (phase === "credit") {
+    lines.push(
+      maxIterations > 0
+        ? `[jq-loop] 批次 ${batchId} 需要确认积分（第 ${iteration}/${maxIterations} 轮）`
+        : `[jq-loop] 批次 ${batchId} 需要确认积分（第 ${iteration} 轮）`,
+    );
+    lines.push(
+      `免费回测额度已用完，${results.length} 个任务已暂停，未自动消耗积分。`,
+    );
+    for (const r of results.slice(0, 10)) {
+      lines.push(
+        `- ${r.tag} acct=${r.account || "-"} status=${r.status}` +
+          (r.creditReason ? ` — ${truncate(r.creditReason, 240)}` : ""),
+      );
+    }
+    lines.push(
+      "",
+      "下一步：先询问用户是否允许使用积分；确认后调用 " +
+        "jq_batch_confirm_credit({batchId, approve:true, confirm:true})，拒绝则 approve:false。",
+    );
+    const creditText = lines.join("\n");
+    return creditText.length > 12_000 ? creditText.slice(0, 12_000) + "\n…（已截断）" : creditText;
+  }
 
   const head =
     phase === "batch" ? "已结束" : phase === "failed" ? "出现失败" : "有新结果";
@@ -80,7 +112,7 @@ export function buildDigest({
     lines.push("", `失败（${failed.length}）：`);
     for (const r of failed.slice(0, 10)) {
       const why = r.error ? ` — ${truncate(r.error, 240)}` : "";
-      lines.push(`- ${r.tag} [${r.mode}] ${r.status}${why}`);
+      lines.push(`- ${r.tag}${r.account ? ` acct=${r.account}` : ""} [${r.mode}] ${r.status}${why}`);
       for (const log of (r.errorLogs || []).slice(-maxErrorLines)) {
         lines.push(`  ${truncate(log, 240)}`);
       }
@@ -96,7 +128,7 @@ export function buildDigest({
     for (const r of backtests.slice(0, maxJobs)) {
       const m = r.metrics || {};
       lines.push(
-        `- ${r.tag}: sharpe=${fmt(m.sharpe)} ann=${fmt(m.annual_algo_return)} ` +
+        `- ${r.tag}${r.account ? ` acct=${r.account}` : ""}: sharpe=${fmt(m.sharpe)} ann=${fmt(m.annual_algo_return)} ` +
           `ret=${fmt(m.algorithm_return)} dd=${fmt(m.max_drawdown)}` +
           (r.id ? ` (id=${r.id})` : ""),
       );

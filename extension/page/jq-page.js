@@ -322,6 +322,56 @@
     return { loggedIn: info.isLogin === 1 || info.isLogin === "1", raw };
   }
 
+  // authIdentity normalizes the login state into the pool's account identity.
+  // userId is a stable hash (never the phone number in userName); alias is a
+  // mutable nickname and is only used for display.
+  async function authIdentity() {
+    const data = await req(PATHS.loginState);
+    const raw = data && data.__html ? {} : data || {};
+    const info = raw.data || raw;
+    const loggedIn = info.isLogin === 1 || info.isLogin === "1";
+    if (!loggedIn) {
+      return { loggedIn: false, uid: "", credits: 0, creditsKnown: false };
+    }
+    let credits = 0;
+    let creditsKnown = false;
+    try {
+      const c = await authCredits();
+      credits = c.amount;
+      creditsKnown = c.known;
+    } catch (_) {
+      /* credits are best-effort */
+    }
+    return {
+      loggedIn: true,
+      uid: info.userId ? String(info.userId) : "",
+      uniqueKey: info.uniqueKey || "",
+      nickname: info.alias || "",
+      vipType: info.vipType || "",
+      level: Number(info.level) || 0,
+      credits,
+      creditsKnown,
+      checkedAt: new Date().toISOString(),
+      source: "login_state",
+    };
+  }
+
+  async function authCredits() {
+    try {
+      const c = await req("/credits/task/getUsableAmount");
+      if (c && c.code === "00000" && c.data && c.data.amount !== undefined && c.data.amount !== null) {
+        const amount = Number(c.data.amount);
+        if (Number.isFinite(amount)) return { amount, known: true };
+      }
+      if (c && typeof c.data === "number") {
+        return { amount: c.data, known: true };
+      }
+      return { amount: 0, known: false };
+    } catch (e) {
+      return { amount: 0, known: false, error: e && e.message ? e.message : String(e) };
+    }
+  }
+
   // ------------------------------------------------------------- ops: strategy
 
   async function strategyList(params) {
@@ -570,6 +620,12 @@
       // e.g. "当前并行编译或回测数量最多2个。" Expose it structurally.
       const mm = String(msg).match(/最多\s*(\d+)\s*个/);
       if (mm) details.maxConcurrent = parseInt(mm[1], 10);
+      if (/(积分|额度|次数|免费|付费|余额|50000)/.test(String(msg))) details.creditRequired = true;
+      const codeStr = String((data && (data.code || data.status)) || "");
+      if (codeStr === "50000") details.creditRequired = true;
+      if (/(needCredit|creditRequired|useCredit|credits?|积分|额度)/i.test(JSON.stringify(data || {}))) {
+        details.creditRequired = true;
+      }
       fail("api_error", "创建回测失败: " + msg, details);
     }
     return { id: detailId, listId, status: "running" };
@@ -692,41 +748,36 @@
 
   // ------------------------------------------------------------ ops: account
 
-  // accountLimits scrapes the account API and membership page for the
-  // concurrency cap (JoinQuant enforces it server-side by VIP tier).
+  // accountLimits reads the live account identity and credits. JoinQuant no
+  // longer exposes a reliable per-account concurrency number (the old VIP pages
+  // are 404), so maxConcurrent is configured manually via accounts.json.
   async function accountLimits() {
-    const out = { tried: [] };
+    const out = { tried: ["/user/index/isLogin", "/user/account/index", "/credits/task/getUsableAmount"] };
+    try {
+      const data = await req(PATHS.loginState);
+      const raw = data && data.__html ? {} : data || {};
+      const info = raw.data || raw;
+      out.uid = info.userId ? String(info.userId) : "";
+      out.nickname = info.alias || "";
+      out.vipType = info.vipType || "";
+      out.level = Number(info.level) || 0;
+    } catch (e) {
+      out.loginError = e && e.message ? e.message : String(e);
+    }
     try {
       const acc = await req("/user/account/index", { params: { json: 1 } });
       out.account = acc && acc.__html ? { html: String(acc.__html).slice(0, 800) } : acc;
     } catch (e) {
       out.accountError = e && e.message ? e.message : String(e);
     }
-    const urls = ["/view/vip", "/view/vip/index", "/default/index/vip", "/user/vip/index", "/vip/index"];
-    const kw = /(并行|同时|并发)[^。！\n<]{0,60}/g;
-    const numRe = /最多\s*(\d+)\s*个/g;
-    for (const u of urls) {
-      out.tried.push(u);
-      let html;
-      try {
-        html = await req(u, { raw: true });
-      } catch (_) {
-        continue;
-      }
-      const text = String(html).replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ");
-      const limits = [];
-      let m;
-      while ((m = kw.exec(text)) && limits.length < 10) limits.push(m[0].trim());
-      const nums = [];
-      let n;
-      while ((n = numRe.exec(text)) && nums.length < 10) nums.push(parseInt(n[1], 10));
-      if (limits.length || nums.length) {
-        out.vipPageUrl = u;
-        out.limits = limits;
-        out.maxConcurrentCandidates = nums;
-        break;
-      }
+    try {
+      const c = await authCredits();
+      out.credits = c.amount;
+      out.creditsKnown = c.known;
+    } catch (_) {
+      /* best effort */
     }
+    out.note = "并行上限请用 jq-mcp accounts cap <alias> <N> 配置；平台拒绝时会自动收紧";
     return out;
   }
 
@@ -735,6 +786,8 @@
   const OPS = {
     ping: async () => ({ pong: true, href: location.href }),
     "auth.status": authStatus,
+    "auth.identity": authIdentity,
+    "auth.credits": authCredits,
     "account.limits": accountLimits,
     "strategy.list": strategyList,
     "strategy.find": strategyFind,

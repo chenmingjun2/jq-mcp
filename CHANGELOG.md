@@ -2,6 +2,51 @@
 
 本项目版本号见 `internal/app/app.go` 中的 `Version`。
 
+## 0.4.0
+
+### 账号池
+
+- **一条命令拉起多个账号窗口**：`jq-mcp accounts add a1 a2` + `accounts open --all`。
+  自动下载并固定 Chrome for Testing（官方构建仍支持 `--load-extension`），
+  每个账号一个独立浏览器 profile，人工登录后自动识别。
+- **账号身份以聚宽 `userId` 为准**：扩展新增 `auth.identity`，daemon 在连接后主动探测，
+  不再信任 hello 自报信息；同一 uid 的重复连接只保留最新。
+- **调度器按账号发槽位**：每账号独立 cap、独立收紧、独立冷却；新增 dispatcher，
+  先匹配账号再派给 worker，避免被某个忙碌账号阻塞。
+- **本地代码是权威**：job 可带 `strategyKey` / `code` / `codePath`，调度器按目标账号
+  自动创建或更新 `[jq-mcp] <name>-<hash>` 副本，`strategyKey + code hash` 复用，不污染用户策略。
+- **容灾迁移**：提交前的未登录、额度耗尽、网络错误可迁移到其他账号（最多
+  `pool.max_failovers` 次）；提交后的掉线只重试读取，不重复提交。
+- **积分感知**：通过 `GET /credits/task/getUsableAmount` 读取可用积分，
+  `useCredit` 任务优先派给有积分的账号。
+- **免费额度优先 + 积分确认**：所有回测先以 `useCredit=false` 提交；免费额度用完时
+  job 进入 `needs_confirmation` 并暂停，`jq_batch_wait` 立即返回待确认任务；
+  `jq_batch_confirm_credit {approve:true, confirm:true}` 后才用积分重试，
+  `approve:false` 则失败。显式 `useCredit:true` 视为预授权（仍先试免费）。
+- **UA 伪装**：每个浏览器 profile 首次启动随机选择 UA（Windows/Linux/Android/
+  macOS/iOS × Chrome/Chromium/Firefox/Safari）并持久化，`accounts ua` 可重随机/关闭；
+  Chrome 端同时关闭 UA Client Hints，避免与伪装 UA 矛盾。Safari 只使用 macOS/iOS
+  等合理组合，不会生成 Android+Safari 这种不存在的指纹。
+- **jq-loop**：多账号批次的结果摘要带 `acct=<alias>`；新增 `job.needs_credit` 唤醒，
+  免费额度用完时立即提醒会话确认积分（不受 `wakeOn` 限制）。
+- **新增 `jq_accounts`**：查看 uid、昵称、状态、cap、在跑数、排队数、积分、冷却与错误。
+- **CLI**：`jq-mcp accounts add|open|close|status|rm|default|cap|doctor`。
+- `jq_batch_submit` 支持 `account` / `placement`，job 支持 `strategyKey` / `name` /
+  `code` / `codePath` / `account`；批次结果与事件新增 `account` / `accountUid` /
+  `attempts` / `countsByAccount`，webhook 新增 `X-JQ-Account`。
+- 单账号行为保持兼容：现有 `strategyId` 任务仍走默认账号，工具参数全部可选。
+
+### 验证
+
+- Chrome for Testing 156.0.8078.47：headless 与 headed 均可同时加载 3 个 profile。
+- 两账号端到端：4 个任务 2/2 分配，单账号 cap=1 不被突破；模拟 a1 掉登录后任务
+  全部迁移到 a2 完成。
+- `auth.identity` 复用 `/user/index/isLogin` 的 `userId`；旧会员页已 404，
+  并发上限改为人工配置 + 平台报错自动收紧。
+- UA：Chrome `--user-agent` 实测能改变 `navigator.userAgent`；配合
+  `--disable-features=UserAgentClientHint` 后 `navigator.userAgentData` 为空。
+- 免费额度：调度器单测覆盖“暂停 → 确认 → 积分重试”和“拒绝 → failed”两条路径。
+
 ## 0.3.0
 
 ### 架构 v2：daemon / proxy 拆分

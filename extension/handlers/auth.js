@@ -3,6 +3,8 @@ import { pageRun, ensureTab, joinquantCookies, cookieHeader } from "./page.js";
 
 export const authHandlers = {
   "auth.status": async () => pageRun("auth.status", {}),
+  "auth.identity": async () => pageRun("auth.identity", {}),
+  "auth.credits": async () => pageRun("auth.credits", {}),
 
   "auth.getCookie": async () => {
     const cookies = await joinquantCookies();

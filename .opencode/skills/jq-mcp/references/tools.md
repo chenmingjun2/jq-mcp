@@ -1,20 +1,46 @@
 # jq-mcp tool reference
 
-40 tools. `confirm` marks write/destructive operations that need `confirm=true`.
+41 tools. `confirm` marks write/destructive operations that need `confirm=true`.
 
 ## Diagnostics
 
-- `jq_bridge_status` — connected clients, extension version, last hello.
-- `jq_health` — `{connected, loggedIn}` in one call.
+- `jq_bridge_status` — connected clients, extension version, account binding, last hello.
+- `jq_health` — `{connected, loggedIn, cap, accounts[]}` in one call.
+- `jq_accounts` — `{refresh?}` → `{default, cap, connected, accounts[], clients[]}`.
+  Account fields: alias, uid, nickname, state (`pending_login|ready|busy|cooling|
+  quota_exhausted|logged_out|disabled`), cap, inFlight, queued, credits,
+  creditsKnown, cooldownUntil, lastError.
 
 ## Auth / account
 
-- `jq_auth_status` — `{loggedIn}`.
+- `jq_auth_status` — `{account?}` → `{loggedIn}`.
 - `jq_auth_get_cookie` — cookie header (sensitive).
 - `jq_auth_open_login` — `{url?}` open login page for manual login.
 - `jq_auth_refresh` — reload the JoinQuant tab to renew the session.
-- `jq_account_limits` — scrape account API + membership page for the concurrent
-  compile/backtest cap and VIP info.
+- `jq_account_limits` — `{account?}` → account identity, credits, VIP info.
+  The concurrency cap is configured manually (`jq-mcp accounts cap`); the old
+  VIP pages are 404 and platform errors tighten the cap automatically.
+
+## Account pool
+
+- One daemon serves many browser profiles. Each profile is one JoinQuant account;
+  identity is the stable `userId` returned by `auth.identity`, never the hello
+  payload or the nickname.
+- Launch/manage profiles from a shell:
+  `jq-mcp accounts add a1 a2` → `accounts open --all` → login manually →
+  `accounts status` / `accounts cap a1 3` / `accounts close --all`.
+- Use `jq_accounts` to see readiness, cap, in-flight, queue, credits, cooldown.
+- `pending_login` means the browser is connected but not logged in; ask the user
+  to finish login, then the daemon binds the uid automatically.
+- Prefer portable jobs (`code`/`codePath` + `strategyKey`) when you want the
+  scheduler to spread work across accounts. Pin with `account` only when the
+  strategy must stay on one account.
+- UA spoofing is per profile and persisted. Check/reroll with
+  `jq-mcp accounts ua <alias> [random|off|<UA>]`; it only takes effect after the
+  browser is restarted.
+- Free quota is always tried first. If a batch pauses with
+  `creditRequired:true`, ask the user before calling
+  `jq_batch_confirm_credit {approve:true, confirm:true}`.
 
 ## Strategy
 
@@ -38,8 +64,8 @@
 
 - `jq_strategy_compile` — `{strategyId, start?, end?}` → `{id, listId, ok,
   compileErrors[], logs[]}`. Use before real backtests.
-- `jq_backtest_run` — `{strategyId, start, end?, capital?, frequency?, compile?}`
-  → `{taskId, id, listId, strategyId, mode, status}`.
+- `jq_backtest_run` — `{strategyId, start, end?, capital?, frequency?, compile?, account?}`
+  → `{taskId, id, listId, strategyId, mode, status, account}`.
 - `jq_backtest_list` — `{strategyId, status?, limit?, compile?}` → `{items}`.
 - `jq_backtest_wait` — `{backtestId, timeoutSeconds?, pollIntervalSeconds?}`
   → `{status: done|failed|timeout, stats?, error?, errors?}`. Fails fast when
@@ -52,16 +78,27 @@
 
 ## Task queue / batch (server-side scheduler)
 
-- `jq_batch_submit` — `{jobs:[{tag?,strategyId,start,end?,capital?,frequency?,compile?,useCredit?,priority?}],
-  maxConcurrent?, workers?, callbackUrl?, callbackSecret?, callbackOn?}` → `{batchId, jobs,...}`.
-  Non-blocking. The scheduler owns concurrency/back-pressure.
-- `jq_batch_status` — `{batchId?, limit?}` → batch snapshot or recent batches.
+- `jq_batch_submit` — `{jobs:[{tag?,strategyId?,strategyKey?,name?,code?,codePath?,
+  account?,placement?,start,end?,capital?,frequency?,compile?,useCredit?,priority?}],
+  account?, placement?, maxConcurrent?, workers?, callbackUrl?, callbackSecret?,
+  callbackOn?}` → `{batchId, cap, accountCaps, jobs,...}`.
+  Non-blocking. Jobs with `code`/`codePath` are portable: the scheduler picks an
+  account and upserts a `[jq-mcp] <name>` copy there (reused by code hash).
+  Jobs with only `strategyId` stay on the default/pinned account.
+- `jq_batch_status` — `{batchId?, limit?}` → batch snapshot (with
+  `countsByAccount`) or recent batches.
 - `jq_batch_wait` — `{batchId, timeoutSeconds?, sinceEventId?, includeEvents?}`
-  → `{counts, done, jobs, events?, nextEventId, newEventCount}`. Blocks until
-  terminal; with `sinceEventId>0` returns on any new event (incremental follow)
-  and includes the event detail. Prefer this over sleep+poll.
+  → `{counts, countsByAccount, done, jobs, events?, nextEventId, newEventCount}`.
+  Blocks until terminal; with `sinceEventId>0` returns on any new event.
 - `jq_batch_events` — `{batchId, sinceEventId?, waitSeconds?, limit?}` → `{events,
   nextEventId, done, hasMore}`. Use for resume/long-poll.
+- `jq_batch_confirm_credit` — `{batchId, approve, tags?, confirm}`. Free quota is
+  always tried first; on exhaustion jobs become `needs_confirmation` and
+  `jq_batch_wait` returns immediately with `creditRequired:true`. Approve only
+  after the user explicitly agrees to spend credits; `approve:false` fails them.
+- Each job carries `account`, `accountUid`, `attempts`; webhook headers add
+  `X-JQ-Account`. After submission, account loss never re-runs the job (the
+  remote run may still be alive); it retries reads and fails with `remoteId`.
 - Callback: when `callbackUrl` is set, terminal events are POSTed asynchronously
   with `X-JQ-Signature` (HMAC-SHA256 over `timestamp.body`) and retried with
   backoff. MCP also emits `notifications/message` on terminal events.

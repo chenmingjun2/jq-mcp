@@ -26,6 +26,7 @@ import (
 // Scheduler is the slice of *sched.Scheduler the API needs.
 type Scheduler interface {
 	Cap() int
+	Accounts() []sched.AccountView
 	SetCap(n int)
 	SubmitWithOptions(jobs []sched.Job, opt sched.SubmitOptions) *sched.Batch
 	Status(batchID string) (*sched.Batch, error)
@@ -105,6 +106,7 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		"startedAt":   s.opt.StartedAt,
 		"connected":   connected,
 		"cap":         s.opt.Scheduler.Cap(),
+		"accounts":    s.opt.Scheduler.Accounts(),
 		"lastEventId": s.opt.Scheduler.LastEventID(),
 		"instances":   s.hub.subscribers(),
 	})

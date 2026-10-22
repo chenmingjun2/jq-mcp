@@ -52,7 +52,8 @@ func newCallbackSender(logger *slog.Logger) *callbackSender {
 // consumer can switch on `type` without unwrapping.
 type callbackPayload struct {
 	Event
-	Counts map[string]int `json:"counts,omitempty"`
+	Counts          map[string]int `json:"counts,omitempty"`
+	CountsByAccount map[string]int `json:"countsByAccount,omitempty"`
 }
 
 func (c *callbackSender) enqueue(ev Event, cb *Callback) {
@@ -108,6 +109,9 @@ func (c *callbackSender) post(cb *Callback, ev Event, body []byte) error {
 	req.Header.Set("X-JQ-Batch-Id", ev.BatchID)
 	req.Header.Set("X-JQ-Delivery", delivery)
 	req.Header.Set("X-JQ-Timestamp", ts)
+	if ev.Job != nil && ev.Job.Account != "" {
+		req.Header.Set("X-JQ-Account", ev.Job.Account)
+	}
 	if cb.Secret != "" {
 		req.Header.Set("X-JQ-Signature", "sha256="+sign(cb.Secret, ts, body))
 	}
@@ -140,8 +144,12 @@ func payloadFor(ev Event) callbackPayload {
 	p := callbackPayload{Event: ev}
 	if len(ev.Jobs) > 0 {
 		p.Counts = map[string]int{}
+		p.CountsByAccount = map[string]int{}
 		for _, js := range ev.Jobs {
 			p.Counts[js.Status]++
+			if js.Account != "" {
+				p.CountsByAccount[js.Account]++
+			}
 		}
 	}
 	return p

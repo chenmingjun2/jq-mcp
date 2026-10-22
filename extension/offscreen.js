@@ -14,27 +14,34 @@ import { BridgeClient } from "./lib/ws-client.js";
 const DEFAULT_URL = "ws://127.0.0.1:8790/ws";
 
 let client = null;
-let config = { wsUrl: DEFAULT_URL, token: "" };
+let config = { wsUrl: DEFAULT_URL, token: "", alias: "", daemonProfile: "" };
 let starting = false;
 
 async function loadConfig() {
-  config = { wsUrl: DEFAULT_URL, token: "" };
+  config = { wsUrl: DEFAULT_URL, token: "", alias: "", daemonProfile: "" };
   // Ask the service worker (it owns chrome.storage).
   try {
     const res = await chrome.runtime.sendMessage({ type: "get-config" });
     if (res && res.config) {
-      config = { wsUrl: res.config.wsUrl || DEFAULT_URL, token: res.config.token || "" };
+      config = {
+        wsUrl: res.config.wsUrl || DEFAULT_URL,
+        token: res.config.token || "",
+        alias: res.config.alias || "",
+        daemonProfile: res.config.daemonProfile || "",
+      };
     }
   } catch (_) {
     /* worker not ready; fall back to the bootstrap file */
   }
-  if (!config.token) {
+  if (!config.token || !config.alias) {
     try {
       const r = await fetch(chrome.runtime.getURL("default-config.json"));
       if (r.ok) {
         const def = await r.json();
         config.wsUrl = config.wsUrl || def.wsUrl || DEFAULT_URL;
-        config.token = def.token || "";
+        config.token = config.token || def.token || "";
+        config.alias = config.alias || def.alias || "";
+        config.daemonProfile = config.daemonProfile || def.daemonProfile || "";
       }
     } catch (_) {
       /* wait for manual configuration */
@@ -75,6 +82,8 @@ async function start() {
     client = new BridgeClient({
       url: config.wsUrl,
       token: config.token,
+      alias: config.alias,
+      daemonProfile: config.daemonProfile,
       onRequest: (method, params) => relay(method, params),
       onStatus: (s) => {
         try {
