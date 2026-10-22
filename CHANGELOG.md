@@ -9,8 +9,9 @@
 - **一条命令拉起多个账号窗口**：`jq-mcp accounts add a1 a2` + `accounts open --all`。
   自动下载并固定 Chrome for Testing（官方构建仍支持 `--load-extension`），
   每个账号一个独立浏览器 profile，人工登录后自动识别。
-- **账号身份以聚宽 `userId` 为准**：扩展新增 `auth.identity`，daemon 在连接后主动探测，
-  不再信任 hello 自报信息；同一 uid 的重复连接只保留最新。
+- **账号身份以聚宽 `uniqueKey` 为准**：扩展新增 `auth.identity`，daemon 在连接后主动探测，
+  不再信任 hello 自报信息；同一 uid 的重复连接只保留最新。`userId` 是会话级字段，
+  扩展重载后会变化，不能做账号主键。
 - **调度器按账号发槽位**：每账号独立 cap、独立收紧、独立冷却；新增 dispatcher，
   先匹配账号再派给 worker，避免被某个忙碌账号阻塞。
 - **本地代码是权威**：job 可带 `strategyKey` / `code` / `codePath`，调度器按目标账号
@@ -41,7 +42,7 @@
 - Chrome for Testing 156.0.8078.47：headless 与 headed 均可同时加载 3 个 profile。
 - 两账号端到端：4 个任务 2/2 分配，单账号 cap=1 不被突破；模拟 a1 掉登录后任务
   全部迁移到 a2 完成。
-- `auth.identity` 复用 `/user/index/isLogin` 的 `userId`；旧会员页已 404，
+- `auth.identity` 复用 `/user/index/isLogin` 的 `uniqueKey`（`userId` 会随扩展重载变化）；旧会员页已 404，
   并发上限改为人工配置 + 平台报错自动收紧。
 - UA：Chrome `--user-agent` 实测能改变 `navigator.userAgent`；配合
   `--disable-features=UserAgentClientHint` 后 `navigator.userAgentData` 为空。

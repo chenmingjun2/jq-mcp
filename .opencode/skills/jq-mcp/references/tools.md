@@ -24,7 +24,8 @@
 ## Account pool
 
 - One daemon serves many browser profiles. Each profile is one JoinQuant account;
-  identity is the stable `userId` returned by `auth.identity`, never the hello
+  identity is the stable `uniqueKey` returned by `auth.identity` (`userId` changes when
+the extension reloads), never the hello
   payload or the nickname.
 - Launch/manage profiles from a shell:
   `jq-mcp accounts add a1 a2` → `accounts open --all` → login manually →

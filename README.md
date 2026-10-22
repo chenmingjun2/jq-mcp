@@ -193,7 +193,7 @@ bin/jq-mcp accounts ua a1 random       # 重随机 UA；off 关闭；也可传�
 bin/jq-mcp accounts close --all
 ```
 
-登录后扩展会自动上报 `auth.identity`，daemon 以聚宽 `userId` 绑定账号；
+登录后扩展会自动上报 `auth.identity`，daemon 以聚宽稳定的 `uniqueKey` 绑定账号；
 `jq_accounts` 可查看每个账号的状态、cap、在跑数、积分与冷却。
 
 **调度语义**：

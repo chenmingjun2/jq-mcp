@@ -345,7 +345,8 @@ jq-mcp accounts doctor          # 检查二进制、profile、扩展、连接
 `userName`、`vipType`、`level`，只是 `auth.status` 目前仅透出 `loggedIn`。所以
 `auth.identity` 不需要新接口，只做归一化：
 
-- `uid` 取 `data.userId`（稳定哈希，不是手机号）；`uniqueKey` 作为辅助校验。
+- `uid` 取 `data.uniqueKey`（稳定哈希，不是手机号）；`userId` 是会话级字段，
+  扩展重载后会变化，不能作为主键。
 - `nickname` 取 `data.alias`；`vip` 取 `vipType != ""`；`level` 原样带回。
 - 积分：`GET /credits/task/getUsableAmount` → `{"data":{"amount":0},...}`；失败则
   `creditsKnown:false`，不阻塞连接。
@@ -354,7 +355,7 @@ jq-mcp accounts doctor          # 检查二进制、profile、扩展、连接
 
 ```json
 {
-  "uid": "<userId>",
+  "uid": "<uniqueKey>",
   "uniqueKey": "<uniqueKey>",
   "nickname": "<alias>",
   "vip": false,
@@ -369,7 +370,7 @@ jq-mcp accounts doctor          # 检查二进制、profile、扩展、连接
 注意：
 
 - 不要用 `userName`（手机号）或 `alias`（可改）做主键。
-- 未登录时 `userId` 缺失，保持 `pending_login`。
+- 未登录时 `uniqueKey` 缺失，保持 `pending_login`。
 - 不把完整原始响应写日志（含手机号/邮箱）；只记 uid 与昵称。
 
 ### 6.2 `hello` 扩展
@@ -800,8 +801,8 @@ ensure(account, key, code):
 1. **CfT 156.0.8078.47（linux64）可用**：`--headless=new` 下 `--load-extension` 正常，
    同时起 3 个 profile，全部连到同一个 daemon（日志 `clients=3`）；headed 模式
    （`DISPLAY=:0`）也能启动并连接。系统自带的 Chrome 154 正式版不能作为底座。
-2. **uid 来源确定**：`/user/login/state` 返回 `userId` / `uniqueKey` / `alias`，
-   `auth.identity` 无需新增接口，只做归一化。
+2. **uid 来源确定**：`/user/login/state` 返回 `uniqueKey` / `userId` / `alias`；
+   `uniqueKey` 稳定，`userId` 会随扩展重载变化；`auth.identity` 只做归一化。
 3. **积分来源确定**：`GET /credits/task/getUsableAmount` 稳定返回 `data.amount`
    （实测当前账号为 0）。
 4. **旧会员页已失效**：`/view/vip`、`/user/vip/index`、`/default/index/vip` 等路径均
