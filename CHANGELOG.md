@@ -2,6 +2,28 @@
 
 本项目版本号见 `internal/app/app.go` 中的 `Version`。
 
+## 0.4.1
+
+### 修复
+
+- **可用积分取错接口**：`/credits/task/getUsableAmount` 返回的是"任务可用额度"（通常 0），
+  改为 `/user/account/getUserInfo` 的 `data.amount`（页面"可用积分"）。
+  例：RuenChen 实际 1011 分，旧代码显示 0，导致误判 `quota_exhausted`。
+- **回测创建重试失控**：`BacktestRun` 重试 240 次（5s 间隔≈20 分钟）→ **6 次**；
+  单次调用 **90s** 超时；整个任务 **15 分钟**上限。卡住的任务不再无限空转。
+- **日提交次数上限未识别**：新增 `isDailyCountLimit`（"太多次数/提交次数/次数回测"）；
+  命中后立即失败并把账号冷却到**次日 00:00**，**不再 failover/迁移**，
+  避免把其他账号一起拖入风控（实测：一个账号撞线会连带烧穿其余账号）。
+
+### 变更
+
+- `maxFailovers` 默认 **2 → 1**。
+
+### 其他
+
+- 扩展 `page/jq-page.js` VERSION **0.4.0 → 0.4.1**。
+- 单测覆盖 `isDailyCountLimit`。
+
 ## 0.4.0
 
 ### 账号池

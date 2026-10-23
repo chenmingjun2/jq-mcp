@@ -37,7 +37,7 @@ import (
 )
 
 // Version is the server version reported during MCP initialize.
-const Version = "0.4.0"
+const Version = "0.4.1"
 
 // Mode selects how the process participates in the daemon/client split.
 type Mode string
