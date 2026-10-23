@@ -335,7 +335,7 @@ func New(client *jq.Client, tasks *task.Manager, workers, maxConcurrent int, log
 		dispatch:      make(chan *JobState, 1024),
 		workers:       workers,
 		maxConcurrent: maxConcurrent,
-		maxFailovers:  2,
+		maxFailovers:  1,
 		jobSubmitWait: 10 * time.Minute,
 		tasks:         tasks,
 		log:           logger,
@@ -993,7 +993,9 @@ func (s *Scheduler) process(js *JobState) {
 		defer s.releaseAccount(acct)
 	}
 	s.removePending(js)
-	ctx := context.Background()
+	// 整个任务最多 15 分钟；避免页面/接口卡住时无限挂起。
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
 
 	s.start(js)
 
@@ -1037,13 +1039,22 @@ func (s *Scheduler) process(js *JobState) {
 	submitted := false
 	creditTried := false
 	backoff := 5 * time.Second
-	for attempt := 0; attempt < 240; attempt++ {
-		r, err := client.BacktestRun(ctx, in)
+	// 最多 6 次（约 30 秒）；平台异常时不长时间空转，避免烧光提交次数。
+	for attempt := 0; attempt < 6; attempt++ {
+		callCtx, callCancel := context.WithTimeout(ctx, 90*time.Second)
+		r, err := client.BacktestRun(callCtx, in)
+		callCancel()
 		if err == nil {
 			res, submitted = r, true
 			break
 		}
 		e := apierr.From(err)
+		if isDailyCountLimit(e.Message) {
+			// 平台按账号限制每日提交次数，积分也不能突破；重试/迁移只会扩大风控。
+			s.markQuota(js.Account, e.Message)
+			s.finish(js, StFailed, "平台日提交次数已用完（次日 00:00 重置）："+e.Message)
+			return
+		}
 		switch e.Code {
 		case apierr.CodeNoExtension, apierr.CodeNotAuthenticated:
 			s.markUnavailable(js.Account, err.Error())
@@ -1260,6 +1271,12 @@ func (s *Scheduler) ConfirmCredit(batchID string, approve bool, tags []string) (
 	return s.Status(batchID)
 }
 func (s *Scheduler) failOrRequeue(js *JobState, reason string) {
+	if isDailyCountLimit(reason) {
+		// 日提交次数上限：迁移只会把其他账号一起拖入风控，直接失败并冷却账号。
+		s.markQuota(js.Account, reason)
+		s.finish(js, StFailed, reason)
+		return
+	}
 	if s.canFailover(js) {
 		s.mu.Lock()
 		js.Attempts++

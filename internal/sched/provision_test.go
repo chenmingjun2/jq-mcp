@@ -96,3 +96,18 @@ func TestProvisionPerAccountIsolation(t *testing.T) {
 		t.Fatalf("accounts shared a copy: a=%s b=%s creates=%d", a, b, client.creates)
 	}
 }
+
+func TestIsDailyCountLimit(t *testing.T) {
+	cases := map[string]bool{
+		"api_error: 创建回测失败: 今天提交了太多次数回测，请明天再试": true,
+		"平台日提交次数已用完":                     true,
+		"次数回测超限":                         true,
+		"系统繁忙，请稍后重试":                    false,
+		"免费回测额度已用完":                     false,
+	}
+	for in, want := range cases {
+		if got := isDailyCountLimit(in); got != want {
+			t.Fatalf("isDailyCountLimit(%q)=%v want %v", in, got, want)
+		}
+	}
+}

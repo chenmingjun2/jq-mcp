@@ -228,6 +228,18 @@ func strategyName(js *JobState, key string) string {
 	return key
 }
 
+// isDailyCountLimit reports JoinQuant's per-account daily submission cap
+// ("今天提交了太多次数回测"). It is not fixable with credits and must not be
+// retried or failed over: doing so burns other accounts' quotas too.
+func isDailyCountLimit(text string) bool {
+	for _, k := range []string{"太多次数", "提交次数", "次数回测"} {
+		if strings.Contains(text, k) {
+			return true
+		}
+	}
+	return false
+}
+
 func isQuotaError(e *apierr.Error) bool {
 	if e == nil {
 		return false
