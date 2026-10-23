@@ -14,7 +14,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.4.0";
+  const VERSION = "0.4.1";
   const BASE = "https://www.joinquant.com";
 
   const PATHS = {
@@ -358,6 +358,22 @@
   }
 
   async function authCredits() {
+    // 正确口径：/user/account/getUserInfo 的 data.amount = 可用积分（页面“可用积分”）。
+    // 旧接口 /credits/task/getUsableAmount 返回的是“任务可用额度”，通常为 0。
+    try {
+      const r = await fetch("/user/account/getUserInfo?userId=", {
+        credentials: "include",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
+      const j = await r.json();
+      const d = (j && j.data) || {};
+      if (d.amount !== undefined && d.amount !== null) {
+        const amount = Number(d.amount);
+        if (Number.isFinite(amount)) return { amount, known: true };
+      }
+    } catch (e) {
+      /* fall through */
+    }
     try {
       const c = await req("/credits/task/getUsableAmount");
       if (c && c.code === "00000" && c.data && c.data.amount !== undefined && c.data.amount !== null) {
